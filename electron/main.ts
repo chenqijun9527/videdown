@@ -1867,6 +1867,26 @@ async function parseKuaishouWithPuppeteer(url: string): Promise<any> {
 }
 
 // 解析视频信息
+// 运行 yt-dlp 并捕获输出（工作目录设为 yt-dlp 所在目录）
+function runYtDlp(args: string[]): Promise<{ code: number | null; output: string; errorOutput: string }> {
+  return new Promise((resolve) => {
+    const ytdlpPath = getYtDlpPath()
+    const cwd = path.dirname(ytdlpPath)
+    const child = spawn(ytdlpPath, args, { cwd })
+    let output = ''
+    let errorOutput = ''
+    child.stdout?.on('data', (data: Buffer) => {
+      output += data.toString()
+    })
+    child.stderr?.on('data', (data: Buffer) => {
+      errorOutput += data.toString()
+    })
+    child.on('close', (code: number | null) => {
+      resolve({ code, output, errorOutput })
+    })
+  })
+}
+
 ipcMain.handle('ytdlp:parse', async (_event, ...args) => {
   const url = args[0] as string
   const cookiesFile = args[1] as string | undefined
@@ -1896,7 +1916,6 @@ ipcMain.handle('ytdlp:parse', async (_event, ...args) => {
   }
   
   return new Promise(async (resolve, reject) => {
-    const ytdlpPath = getYtDlpPath()
     const isYoutube = url.includes('youtube.com') || url.includes('youtu.be')
     const isBilibili = url.includes('bilibili.com') || url.includes('b23.tv')
 
@@ -1930,49 +1949,33 @@ ipcMain.handle('ytdlp:parse', async (_event, ...args) => {
         const runtimeName = isNode ? 'node' : 'deno'
         args.push('--js-runtimes', `${runtimeName}:${runtimePath}`)
       }
+    }
 
+    // 收集 cookie 参数（B站/YouTube 需要 cookies 避免 412/登录限制）
+    const cookieArgs: string[] = []
+    if (isYoutube || isBilibili) {
       if (cookiesFile && fs.existsSync(cookiesFile)) {
-        args.push('--cookies', cookiesFile)
+        cookieArgs.push('--cookies', cookiesFile)
       } else {
         const browser = getAvailableBrowser()
-        if (browser) args.push('--cookies-from-browser', browser)
+        if (browser) cookieArgs.push('--cookies-from-browser', browser)
       }
     }
 
-    // B站也需要 cookies 避免 412 错误
-    if (isBilibili) {
-      if (cookiesFile && fs.existsSync(cookiesFile)) {
-        args.push('--cookies', cookiesFile)
-      } else {
-        const browser = getAvailableBrowser()
-        if (browser) args.push('--cookies-from-browser', browser)
-      }
+    // 先带 cookie 解析；若因 cookie 读取失败（如 Chrome 数据库被锁/新版加密），去掉 cookie 重试一次
+    let result = await runYtDlp(args.concat(cookieArgs, url))
+    if (result.code !== 0 && cookieArgs.length > 0) {
+      console.log('[ytdlp:parse] 带 cookie 解析失败，尝试无 cookie 重试:', result.errorOutput.trim().split('\n').slice(-1)[0])
+      result = await runYtDlp(args.concat(url))
     }
-    
-    args.push(url)
-    
-    // 设置工作目录为 yt-dlp 所在目录
-    const cwd = path.dirname(ytdlpPath)
-    const child = spawn(ytdlpPath, args, { cwd })
-    let output = ''
-    let errorOutput = ''
-    
-    child.stdout?.on('data', (data: Buffer) => {
-      output += data.toString()
-    })
-    
-    child.stderr?.on('data', (data: Buffer) => {
-      errorOutput += data.toString()
-    })
-    
-    child.on('close', (code: number | null) => {
-      if (code !== 0) {
-        reject(new Error(errorOutput || '解析失败'))
-        return
-      }
-      
-      try {
-        const info = JSON.parse(output)
+    if (result.code !== 0) {
+      reject(new Error(result.errorOutput || '解析失败'))
+      return
+    }
+    const output = result.output
+
+    try {
+      const info = JSON.parse(output)
 
         // 返回所有视频格式（B站/Instagram可能音视频分离，yt-dlp会自动合并）
         let formats = (info.formats || [])
@@ -2182,7 +2185,6 @@ ipcMain.handle('ytdlp:parse', async (_event, ...args) => {
       }
     })
   })
-})
 
 // 直接下载文件（用于抖音等直接URL）
 async function downloadDirectFile(url: string, outputPath: string, taskId: string): Promise<void> {
@@ -2399,36 +2401,32 @@ ipcMain.handle('ytdlp:download', async (_event, options: {
         const runtimeName = isNode ? 'node' : 'deno'
         args.push('--js-runtimes', `${runtimeName}:${runtimePath}`)
       }
-
-      if (options.cookiesFile && fs.existsSync(options.cookiesFile)) {
-        args.push('--cookies', options.cookiesFile)
-      } else {
-        const browser = getAvailableBrowser()
-        if (browser) args.push('--cookies-from-browser', browser)
-      }
     }
 
-    // B站也需要 cookies 避免 412 错误
-    if (isBilibili) {
+    // 收集 cookie 参数（B站/YouTube 需要 cookies 避免 412/登录限制）
+    const cookieArgs: string[] = []
+    if (isYoutube || isBilibili) {
       if (options.cookiesFile && fs.existsSync(options.cookiesFile)) {
-        args.push('--cookies', options.cookiesFile)
+        cookieArgs.push('--cookies', options.cookiesFile)
       } else {
         const browser = getAvailableBrowser()
-        if (browser) args.push('--cookies-from-browser', browser)
+        if (browser) cookieArgs.push('--cookies-from-browser', browser)
       }
     }
-    
-    args.push(options.url)
     
     // 设置工作目录为 yt-dlp 所在目录
     const cwd = path.dirname(ytdlpPath)
-    const child = spawn(ytdlpPath, args, { cwd })
     let downloadedFile = ''
     let lastProgress = 0
     let hasStarted = false
     let isPaused = false
     let errorOutput = ''
-    
+    let cookieRetried = false
+
+    // 启动下载（cookie 读取失败时允许无 cookie 重试一次）
+    const launch = (launchArgs: string[]) => {
+    const child = spawn(ytdlpPath, launchArgs, { cwd })
+
     // 存储下载任务
     activeDownloads.set(options.taskId, {
       child,
@@ -2551,6 +2549,14 @@ ipcMain.handle('ytdlp:download', async (_event, options: {
         // 提取最后一行非空错误信息
         const errorLines = errorOutput.split('\n').filter((l: string) => l.trim())
         const lastError = errorLines.length > 0 ? errorLines[errorLines.length - 1].trim() : ''
+        // cookie 读取失败（Chrome 数据库被锁/新版加密）→ 去掉 cookie 重试一次
+        if (!cookieRetried && cookieArgs.length > 0 && /cookie|Cookie/.test(lastError)) {
+          cookieRetried = true
+          errorOutput = ''
+          console.log('[download] 带 cookie 下载失败，尝试无 cookie 重试:', lastError)
+          launch(args.concat(options.url))
+          return
+        }
         // 检查是否是 HTTP 429 错误
         if (lastError.includes('429') || lastError.includes('Too Many Requests')) {
           reject(new Error('YouTube 请求过于频繁，请等待几分钟后重试 (HTTP 429)'))
@@ -2635,6 +2641,9 @@ ipcMain.handle('ytdlp:download', async (_event, options: {
     child.on('error', (err) => {
       reject(err)
     })
+    }
+
+    launch(args.concat(cookieArgs, options.url))
   })
 })
 
