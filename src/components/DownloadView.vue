@@ -744,8 +744,12 @@ const downloadDir = ref('')
 
 // 清理非法文件名字符
 function sanitizeFilename(filename: string): string {
-  // 替换 Windows 和 Unix 中的非法字符
-  return filename.replace(/[<>"/\\|?*]/g, '_').trim()
+  // 替换 Windows 和 Unix 中的非法字符 + 控制字符（换行/制表符等，Windows 不允许），并压缩空白
+  return filename
+    .replace(/[<>"/\\|?*]/g, '_')
+    .replace(/[\x00-\x1F\x7F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
 }
 
 // Platforms

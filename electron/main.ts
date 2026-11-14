@@ -1306,19 +1306,28 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
     await new Promise(r => setTimeout(r, 4000))
 
     // DOM 提取：作品网格已 SSR 渲染在页面里（实测 25 个/页），
-    // 从视频链接 + 封面 img alt 提取标题，作为 API 拦截的兜底与补充
+    // 从视频链接 + 封面 img alt 提取标题，作为 API 拦截的兜底与补充。
+    // 注意：页脚 user-page-footer 区块有推荐视频（老视频/无 alt），必须排除，
+    // 否则批量列表会混入 8 个与作品无关的推荐视频
     const domItems = await page.evaluate(() => {
       const items: Array<{ id: string; title: string; cover: string; duration: number }> = []
       const seen = new Set<string>()
       for (const a of document.querySelectorAll('a[href*="/video/"]')) {
+        // 排除页脚推荐区块
+        if (a.closest('[class*="user-page-footer"]')) continue
         const m = a.getAttribute('href')?.match(/\/video\/(\d+)/)
         if (!m || seen.has(m[1])) continue
         seen.add(m[1])
         const li = a.closest('li') || a.parentElement
         const img = li?.querySelector('img')
+        // 标题：优先 img alt（去掉"作者："前缀），兜底 aria-label / 链接文本
+        let title = (img?.getAttribute('alt') || '').replace(/^[^：:]*[：:]/, '').trim()
+        if (!title) {
+          title = a.getAttribute('aria-label') || (a.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 60)
+        }
         items.push({
           id: m[1],
-          title: (img?.getAttribute('alt') || '').replace(/^[^：:]*[：:]/, '').trim() || '抖音视频',
+          title: title || '抖音视频',
           cover: img?.src || '',
           duration: 0,
         })
@@ -2706,11 +2715,24 @@ async function downloadDirectFile(url: string, outputPath: string, taskId: strin
       const totalSize = parseInt(response.headers.get('content-length') || '0')
       const writer = fs.createWriteStream(outputPath)
 
+      // 等待文件打开成功：否则 open 失败的 error 事件会在后续监听器挂载前触发，
+      // 变成未捕获异常导致整个主进程崩溃
+      try {
+        await new Promise<void>((resolveOpen, rejectOpen) => {
+          writer.once('open', () => resolveOpen())
+          writer.once('error', (err: any) => rejectOpen(err))
+        })
+      } catch (openErr: any) {
+        reject(new Error(`无法创建文件: ${openErr?.message || openErr}`))
+        return
+      }
+
       let downloaded = 0
       let lastProgressUpdate = 0
       const reader = response.body?.getReader()
 
       if (!reader) {
+        writer.destroy()
         reject(new Error('无法读取响应流'))
         return
       }
@@ -2850,6 +2872,7 @@ ipcMain.handle('ytdlp:download', async (_event, options: {
         return
       } catch (e: any) {
         // 如果直接下载失败，回退到 yt-dlp
+        console.log('[download] 直链下载失败，回退 yt-dlp:', e?.message || e, '| 直链:', options.directUrl?.slice(0, 100))
       }
     }
     
