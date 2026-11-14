@@ -182,8 +182,9 @@ function extractDouyinVideoId(url: string): string | null {
 }
 
 // 检查是否是抖音用户主页链接（作品/收藏/喜欢，批量下载入口）
+// 覆盖 douyin.com/user/<uid> 与分享页 iesdouyin.com/share/user/<uid> 两种形态
 function isDouyinProfileUrl(url: string): boolean {
-  return /douyin\.com\/user\//.test(url)
+  return /douyin\.com\/(?:share\/)?user\//.test(url)
 }
 
 // 解析 Netscape 格式 cookies 文件（Get cookies.txt 扩展导出的格式）
@@ -1191,6 +1192,17 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
     throw new Error('未检测到 Chrome 浏览器')
   }
 
+  // 分享页 → 规范主页地址（iesdouyin.com/share/user/<uid> → douyin.com/user/<uid>）
+  // user/self 保持原样（依赖登录态）
+  let profileUrl = url
+  if (!url.includes('/user/self')) {
+    const m = url.match(/iesdouyin\.com\/share\/user\/([^?&#]+)/) || url.match(/douyin\.com\/user\/([^?&#]+)/)
+    if (m) {
+      profileUrl = `https://www.douyin.com/user/${decodeURIComponent(m[1])}`
+      console.log('[douyin:profile] 规范主页地址:', profileUrl.slice(0, 80))
+    }
+  }
+
   const browser = await puppeteer.launch({
     headless: true,
     executablePath: chromePath,
@@ -1267,20 +1279,31 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       }
     })
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
     await new Promise(r => setTimeout(r, 5000))
 
-    // 点击"作品"tab（其他用户主页需要；user/self 的收藏页则保持原 tab）
-    const isSelfPage = url.includes('/user/self')
-    if (!isSelfPage) {
-      await page.evaluate(() => {
-        const t = [...document.querySelectorAll('[class*="semi-tabs-tab"], [role="tab"]')].find(
-          (el: Element) => (el.textContent || '').trim() === '作品'
-        ) as HTMLElement | undefined
-        if (t) t.click()
-      })
-      await new Promise(r => setTimeout(r, 4000))
-    }
+    // 根据 URL 的 showTab 参数决定目标列表：
+    //   showTab=favorite_collection → 收藏（user/self 需要登录态）
+    //   showTab=like → 喜欢（多数作者为私密，未登录为空）
+    //   默认 → 作品
+    const showTabMatch = profileUrl.match(/[?&]showTab=([^&#]+)/)
+    const showTab = showTabMatch ? showTabMatch[1] : 'post'
+    const targetTabName =
+      showTab === 'favorite_collection' || showTab === 'collection' ? '收藏' :
+      showTab === 'like' ? '喜欢' :
+      showTab === 'post' ? '作品' : '作品'
+    const clickedTab = await page.evaluate((tabName: string) => {
+      const tabs = [...document.querySelectorAll('[class*="semi-tabs-tab"], [role="tab"]')] as HTMLElement[]
+      // tab 文本可能是 "作品53"（带数量），用前缀匹配
+      const t = tabs.find(el => (el.textContent || '').trim().startsWith(tabName))
+      if (t) {
+        t.click()
+        return (t.textContent || '').trim().slice(0, 10)
+      }
+      return ''
+    }, targetTabName)
+    console.log('[douyin:profile] 目标 tab:', targetTabName, '| 实际点击:', clickedTab || '(未找到，使用页面默认)')
+    await new Promise(r => setTimeout(r, 4000))
 
     // DOM 提取：作品网格已 SSR 渲染在页面里（实测 25 个/页），
     // 从视频链接 + 封面 img alt 提取标题，作为 API 拦截的兜底与补充
@@ -1350,9 +1373,10 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       thumbnail: videos[0]?.cover || '',
       duration: 0,
       uploader: authorName || '',
-      webpageUrl: url,
+      webpageUrl: profileUrl,
       formats: [],
       isBatch: true,
+      batchTab: showTab,
       batchVideos: videos,
       source: 'douyin-profile',
     }
@@ -2336,6 +2360,26 @@ ipcMain.handle('ytdlp:parse', async (_event, ...args) => {
   if (extractedUrl !== url) {
     console.log('[ytdlp:parse] 从分享文本提取抖音链接:', extractedUrl.slice(0, 120))
     url = extractedUrl
+  }
+  // 分享短链接先解析重定向（v.douyin.com → 视频页或作者主页），
+  // 主页口令会跳到 iesdouyin.com/share/user/<uid>，必须先解析才能识别
+  if (isDouyinUrl(url)) {
+    try {
+      const resp = await fetch(url, {
+        redirect: 'follow',
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        },
+      })
+      const finalUrl = resp.url || url
+      if (finalUrl !== url && /douyin\.com\/(?:share\/)?(?:video|user|note|slides)\//.test(finalUrl)) {
+        console.log('[ytdlp:parse] 分享短链接解析:', finalUrl.slice(0, 130))
+        url = finalUrl
+      }
+    } catch (e) {
+      // 解析失败保持原链接，交给后续解析器处理
+    }
   }
   // 抖音用户主页：枚举视频列表（批量下载）
   if (isDouyinProfileUrl(url)) {

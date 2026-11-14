@@ -49,6 +49,7 @@ export interface VideoInfo {
   isYoutube?: boolean
   isBatch?: boolean
   batchVideos?: BatchVideo[]
+  batchTab?: string  // 批量枚举来源：post（作品）/ like（喜欢）/ favorite_collection（收藏）
 }
 
 // 批量下载的视频条目（抖音主页枚举结果）

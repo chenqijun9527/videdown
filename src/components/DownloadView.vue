@@ -160,6 +160,23 @@
               </div>
             </div>
 
+            <!-- 列表来源切换：作品 / 喜欢 / 收藏 -->
+            <div class="flex items-center gap-2">
+              <span class="text-[11px] text-on-surface-variant">列表来源：</span>
+              <button
+                v-for="tab in batchTabs"
+                :key="tab.value"
+                class="px-3 py-1 text-[11px] font-semibold rounded-full border transition-colors"
+                :class="activeBatchTab === tab.value
+                  ? 'bg-primary-container text-on-primary-container border-primary/40'
+                  : 'bg-surface-container-lowest text-on-surface-variant border-outline-variant/20 hover:border-primary/40'"
+                :disabled="isParsing"
+                @click="switchBatchTab(tab.value)"
+              >
+                {{ tab.label }}
+              </button>
+            </div>
+
             <div class="flex items-center justify-between">
               <span class="text-[11px] font-mono text-on-surface-variant">已选 {{ selectedBatchIds.size }} 个</span>
               <button
@@ -565,6 +582,34 @@ const batchAllSelected = computed(() => {
   return list.length > 0 && selectedBatchIds.value.size === list.length
 })
 const isBatchDownloading = ref(false)
+const batchTabs = [
+  { label: '作品', value: 'post' },
+  { label: '喜欢', value: 'like' },
+  { label: '收藏', value: 'favorite_collection' },
+]
+const activeBatchTab = computed(() => batchResult.value?.batchTab || 'post')
+
+// 切换批量列表来源：修改主页 URL 的 showTab 参数后重新解析
+function switchBatchTab(tab: string) {
+  if (activeBatchTab.value === tab || isParsing.value) return
+  const base = batchResult.value?.webpageUrl || url.value
+  if (!base || !base.includes('douyin.com/user/')) return
+  try {
+    const u = new URL(base)
+    if (tab === 'post') {
+      u.searchParams.delete('showTab')
+      u.searchParams.delete('showSubTab')
+    } else {
+      u.searchParams.set('showTab', tab)
+    }
+    url.value = u.toString()
+    batchResult.value = null
+    selectedBatchIds.value = new Set()
+    parseVideo()
+  } catch (e) {
+    // URL 构建失败则忽略
+  }
+}
 const selectedFormat = ref<VideoFormat | null>(null)
 const selectedAudioFormat = ref<AudioFormat | null>(null)
 const selectedAudioTrack = ref<AudioTrack | null>(null)
