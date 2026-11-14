@@ -8,6 +8,7 @@ export interface VideoFormat {
   fps?: number
   hasAudio?: boolean
   url?: string  // 直接下载链接（用于抖音等平台）
+  audioUrl?: string  // 分离的音频流直链（抖音 CDP 拦截，下载后需与 url 合并）
 }
 
 export interface AudioTrack {
@@ -46,6 +47,18 @@ export interface VideoInfo {
   subtitles?: SubtitleInfo[]
   audioFormats?: AudioFormat[]
   isYoutube?: boolean
+  isBatch?: boolean
+  batchVideos?: BatchVideo[]
+}
+
+// 批量下载的视频条目（抖音主页枚举结果）
+export interface BatchVideo {
+  id: string
+  title: string
+  cover?: string
+  duration?: number
+  url: string
+  directUrl?: string
 }
 
 export interface DownloadTask {

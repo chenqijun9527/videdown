@@ -137,6 +137,66 @@
             </div>
           </div>
           
+          <!-- Batch Download Panel (抖音主页枚举) -->
+          <div v-if="batchResult" class="mt-2 flex flex-col gap-3">
+            <div class="flex items-center justify-between border-b border-outline-variant/20 pb-2">
+              <h3 class="font-headline text-sm font-bold text-on-surface">
+                批量下载 - {{ batchResult.title }}（共 {{ batchResult.batchVideos?.length || 0 }} 个）
+              </h3>
+              <div class="flex items-center gap-2">
+                <button
+                  class="px-2 py-1 text-[11px] font-semibold rounded-md bg-surface-container-highest text-on-surface hover:bg-surface-variant transition-colors"
+                  @click="toggleBatchSelectAll"
+                >
+                  {{ batchAllSelected ? '取消全选' : '全选' }}
+                </button>
+                <button
+                  class="p-1 text-on-surface-variant hover:text-error transition-colors"
+                  @click="clearBatchResult"
+                  title="关闭批量面板"
+                >
+                  <MaterialIcon name="close" :size="16" />
+                </button>
+              </div>
+            </div>
+
+            <div class="flex items-center justify-between">
+              <span class="text-[11px] font-mono text-on-surface-variant">已选 {{ selectedBatchIds.size }} 个</span>
+              <button
+                class="flex items-center gap-2 px-4 py-2 rounded-md h-9 font-headline font-semibold text-sm transition-all border-2 bg-tertiary-container/40 text-tertiary border-tertiary/30 hover:bg-tertiary-container/60 hover:border-tertiary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                :disabled="selectedBatchIds.size === 0 || isBatchDownloading"
+                @click="startBatchDownload"
+              >
+                <MaterialIcon v-if="isBatchDownloading" name="sync" :size="16" class="animate-spin" />
+                <MaterialIcon v-else name="download" :size="16" />
+                <span>{{ isBatchDownloading ? '批量下载中...' : '下载选中视频' }}</span>
+              </button>
+            </div>
+
+            <div class="flex flex-col gap-1 max-h-96 overflow-y-auto pr-1">
+              <label
+                v-for="item in batchResult.batchVideos"
+                :key="item.id"
+                class="flex items-center gap-3 p-2 rounded-md cursor-pointer transition-colors border"
+                :class="selectedBatchIds.has(item.id) ? 'bg-surface-container-highest/50 border-primary/30' : 'bg-surface-container-lowest border-outline-variant/20 hover:border-primary/40'"
+                @click="toggleBatchItem(item.id)"
+              >
+                <div
+                  class="size-4 rounded-sm border-2 flex-shrink-0"
+                  :class="selectedBatchIds.has(item.id) ? 'border-primary bg-primary' : 'border-outline-variant bg-surface'"
+                />
+                <div
+                  class="w-16 h-10 rounded-sm bg-surface-variant bg-cover bg-center flex-shrink-0"
+                  :style="{ backgroundImage: `url(${item.cover})` }"
+                />
+                <span class="text-xs text-on-surface line-clamp-1 flex-1">{{ item.title }}</span>
+                <span v-if="item.duration" class="text-[10px] font-mono text-on-surface-variant flex-shrink-0">
+                  {{ formatDuration(item.duration) }}
+                </span>
+              </label>
+            </div>
+          </div>
+
           <!-- Preview Section -->
           <div v-if="videoInfo" class="mt-2 flex flex-col gap-4">
             <h3 class="font-headline text-sm font-bold text-on-surface border-b border-outline-variant/20 pb-2">解析结果预览</h3>
@@ -467,7 +527,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import MaterialIcon from './icons/MaterialIcon.vue'
-import type { VideoInfo, VideoFormat, DownloadTask, AudioFormat, AudioTrack } from '../types'
+import type { VideoInfo, VideoFormat, DownloadTask, AudioFormat, AudioTrack, BatchVideo } from '../types'
 
 // URL Input
 const url = ref('')
@@ -497,6 +557,14 @@ function openCookieHelp() {
 const isParsing = ref(false)
 const parseProgress = ref(0)
 const videoInfo = ref<VideoInfo | null>(null)
+// 批量下载状态（抖音主页枚举）
+const batchResult = ref<VideoInfo | null>(null)
+const selectedBatchIds = ref<Set<string>>(new Set())
+const batchAllSelected = computed(() => {
+  const list = batchResult.value?.batchVideos || []
+  return list.length > 0 && selectedBatchIds.value.size === list.length
+})
+const isBatchDownloading = ref(false)
 const selectedFormat = ref<VideoFormat | null>(null)
 const selectedAudioFormat = ref<AudioFormat | null>(null)
 const selectedAudioTrack = ref<AudioTrack | null>(null)
@@ -747,6 +815,17 @@ async function parseVideo() {
     
     const info = await window.electronAPI.ytdlp.parse(url.value, cookiesFile)
     videoInfo.value = info
+
+    // 抖音主页枚举结果：进入批量下载面板
+    if (info.isBatch && info.batchVideos && info.batchVideos.length > 0) {
+      batchResult.value = info
+      selectedBatchIds.value = new Set(info.batchVideos.map((v: BatchVideo) => v.id))
+      videoInfo.value = null
+      parseProgress.value = 100
+      return
+    }
+    batchResult.value = null
+    selectedBatchIds.value = new Set()
     
     // B站预览图需要特殊处理（添加referer）
     if (isBilibiliUrl(url.value) && info.thumbnail) {
@@ -883,6 +962,109 @@ async function startDownload() {
   isDownloading.value = false
 }
 
+// ---------- 批量下载（抖音主页枚举） ----------
+
+function toggleBatchItem(id: string) {
+  const next = new Set(selectedBatchIds.value)
+  if (next.has(id)) {
+    next.delete(id)
+  } else {
+    next.add(id)
+  }
+  selectedBatchIds.value = next
+}
+
+function toggleBatchSelectAll() {
+  const list = batchResult.value?.batchVideos || []
+  if (batchAllSelected.value) {
+    selectedBatchIds.value = new Set()
+  } else {
+    selectedBatchIds.value = new Set(list.map(v => v.id))
+  }
+}
+
+function clearBatchResult() {
+  batchResult.value = null
+  selectedBatchIds.value = new Set()
+}
+
+async function startBatchDownload() {
+  if (!batchResult.value || isBatchDownloading.value) return
+  const items = (batchResult.value.batchVideos || []).filter(v => selectedBatchIds.value.has(v.id))
+  if (items.length === 0) return
+
+  isBatchDownloading.value = true
+  const settings = JSON.parse(localStorage.getItem('settings') || '{}')
+  const cookiesFile = settings.cookiesFile || ''
+
+  try {
+    // 逐个处理：有直链的直接入队；没有的先解析拿最优格式
+    for (const item of items) {
+      let selectedFormat: VideoFormat
+      let title = item.title
+
+      if (item.directUrl) {
+        selectedFormat = {
+          formatId: 'direct',
+          quality: '默认',
+          ext: 'mp4',
+          filesize: 0,
+          width: 0,
+          height: 0,
+          hasAudio: true,
+          url: item.directUrl,
+        }
+      } else {
+        try {
+          const info = await window.electronAPI.ytdlp.parse(item.url, cookiesFile)
+          if (!info || !info.formats || info.formats.length === 0) continue
+          title = info.title || title
+          selectedFormat = info.formats[0]
+        } catch (e: any) {
+          // 单个视频解析失败：加入错误任务提示
+          const taskId = Date.now().toString() + Math.random().toString(36).slice(2, 6)
+          const task: DownloadTask = {
+            id: taskId,
+            url: item.url,
+            videoInfo: { id: item.id, title: item.title, thumbnail: item.cover || '', webpageUrl: item.url, formats: [] },
+            selectedFormat: { formatId: 'error', quality: '解析失败', ext: 'mp4' },
+            outputDir: downloadDir.value,
+            status: 'error',
+            progress: 0,
+            error: e?.message || '解析失败',
+            createdAt: new Date().toISOString(),
+          }
+          downloadTasks.value.unshift(task)
+          continue
+        }
+      }
+
+      const taskId = Date.now().toString() + Math.random().toString(36).slice(2, 6)
+      const task: DownloadTask = {
+        id: taskId,
+        url: item.url,
+        videoInfo: {
+          id: item.id,
+          title: title,
+          thumbnail: item.cover || '',
+          duration: item.duration || 0,
+          webpageUrl: item.url,
+          formats: [selectedFormat],
+        },
+        selectedFormat: selectedFormat,
+        outputDir: downloadDir.value,
+        status: 'pending',
+        progress: 0,
+        createdAt: new Date().toISOString(),
+      }
+      downloadTasks.value.unshift(task)
+      await processDownload(task)
+    }
+  } finally {
+    isBatchDownloading.value = false
+  }
+}
+
 // 存储每个任务的进度监听器清理函数
 const taskProgressCleanups = new Map<string, () => void>()
 
@@ -955,6 +1137,7 @@ async function processDownload(task: DownloadTask) {
       outputDir: task.outputDir,
       taskId: task.id,
       directUrl: useDirectDownload && directUrl ? directUrl : undefined,
+      audioUrl: useDirectDownload && directUrl ? task.selectedFormat.audioUrl : undefined,
       filename: useDirectDownload && directUrl ? `${sanitizeFilename(task.videoInfo.title).slice(0, 50)}_${task.selectedFormat.quality}.mp4` : undefined,
       cookiesFile: cookiesFile,
       filenameTemplate: filenameTemplate,

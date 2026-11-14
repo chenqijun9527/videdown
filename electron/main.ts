@@ -159,6 +159,62 @@ function isDouyinUrl(url: string): boolean {
   return url.includes('douyin.com') || url.includes('v.douyin.com')
 }
 
+// 从分享口令/整段文本中提取抖音链接（借鉴 douyin-video-downloader 的 URL_RE）
+function extractDouyinUrl(input: string): string {
+  // 纯数字视为视频 ID
+  if (/^\d{15,22}$/.test(input.trim())) {
+    return `https://www.douyin.com/video/${input.trim()}`
+  }
+  const m = input.match(/https?:\/\/(?:v\.douyin\.com|(?:www\.|m\.)?(?:iesdouyin|douyin)\.com)\/[^\s<>"'，。]+/)
+  if (m) {
+    return m[0].replace(/[.,;:)\]}>"'，。]+$/, '')
+  }
+  return input
+}
+
+// 从抖音 URL 中提取视频 ID（支持 /video/ID、modal_id=ID）
+function extractDouyinVideoId(url: string): string | null {
+  let m = url.match(/\/video\/(\d+)/)
+  if (m) return m[1]
+  m = url.match(/modal_id=(\d+)/)
+  if (m) return m[1]
+  return null
+}
+
+// 检查是否是抖音用户主页链接（作品/收藏/喜欢，批量下载入口）
+function isDouyinProfileUrl(url: string): boolean {
+  return /douyin\.com\/user\//.test(url)
+}
+
+// 解析 Netscape 格式 cookies 文件（Get cookies.txt 扩展导出的格式）
+function parseNetscapeCookies(content: string): Array<{ domain: string; path: string; name: string; value: string }> {
+  const cookies: Array<{ domain: string; path: string; name: string; value: string }> = []
+  for (const line of content.split('\n')) {
+    const t = line.trim()
+    if (!t || t.startsWith('#')) continue
+    const parts = t.split('\t')
+    if (parts.length < 7) continue
+    cookies.push({
+      domain: parts[0].trim(),
+      path: parts[2].trim(),
+      name: parts[5].trim(),
+      value: parts[6].trim(),
+    })
+  }
+  return cookies
+}
+
+// 判断是否是抖音媒体 CDN 流（借鉴 douyin-video-downloader 的 is_media_url，适配新版 MSE 播放器）
+// 新版 PC 播放器用 MSE 拉碎片：路径含 media-video-avc1 / media-audio-und-mp4a，
+// 或直接以 type=media 请求 douyinvod 域名
+function isDouyinMediaUrl(u: string, type?: string): boolean {
+  const hosts = ['douyinvod.com', 'zjcdn.com', 'bytecdn', 'douyinstatic', '/video/tos/']
+  const hostHit = hosts.some(h => u.includes(h))
+  if (!hostHit) return false
+  const pathHit = u.includes('media-video') || u.includes('media-audio')
+  return pathHit || type === 'media' || type === 'fetch'
+}
+
 // 检查是否是快手链接
 function isKuaishouUrl(url: string): boolean {
   return url.includes('kuaishou.com') || url.includes('v.kuaishou.com')
@@ -470,11 +526,16 @@ async function parseDouyinWithAPI(url: string): Promise<any> {
   }
   
   const detail = data.aweme_detail
+  return buildDouyinFormats(detail, url)
+}
+
+// 从抖音 API 详情数据构建解析结果（parseDouyinWithAPI 与 parseDouyinWithCDP 复用）
+function buildDouyinFormats(detail: any, url: string): any {
   const video = detail.video
-  
+
   // 用于去重，只保留每个清晰度的最佳版本
   const qualityMap = new Map<string, any>()
-  
+
   // 处理 bit_rate 中的各种清晰度
   if (video.bit_rate && video.bit_rate.length > 0) {
     video.bit_rate.forEach((br: any, index: number) => {
@@ -482,7 +543,7 @@ async function parseDouyinWithAPI(url: string): Promise<any> {
         let quality = '默认'
         let qualityKey = 'default'
         let height = br.height || 0
-        
+
         if (br.gear_name) {
           const match = br.gear_name.match(/(\d+)/)
           if (match) {
@@ -497,7 +558,7 @@ async function parseDouyinWithAPI(url: string): Promise<any> {
           quality = `${br.height}p`
           qualityKey = String(br.height)
         }
-        
+
         let filesize = br.data_size || 0
         if (!filesize && video.duration) {
           const durationSec = video.duration / 1000
@@ -508,7 +569,7 @@ async function parseDouyinWithAPI(url: string): Promise<any> {
           else if (height >= 360) estimatedBitrate = 800000
           filesize = Math.floor((estimatedBitrate * durationSec) / 8)
         }
-        
+
         const existing = qualityMap.get(qualityKey)
         if (!existing || filesize > existing.filesize) {
           qualityMap.set(qualityKey, {
@@ -526,12 +587,12 @@ async function parseDouyinWithAPI(url: string): Promise<any> {
       }
     })
   }
-  
+
   // 如果没有从 bit_rate 获取到格式，尝试使用 play_addr
   if (qualityMap.size === 0 && video.play_addr) {
     const playAddr = video.play_addr
     let filesize = playAddr.data_size || 0
-    
+
     if (!filesize && video.duration) {
       const durationSec = video.duration / 1000
       const height = playAddr.height || 720
@@ -542,7 +603,7 @@ async function parseDouyinWithAPI(url: string): Promise<any> {
       else if (height >= 360) estimatedBitrate = 800000
       filesize = Math.floor((estimatedBitrate * durationSec) / 8)
     }
-    
+
     qualityMap.set('default', {
       formatId: 'normal',
       quality: '默认',
@@ -555,11 +616,11 @@ async function parseDouyinWithAPI(url: string): Promise<any> {
       url: playAddr.url_list[0]
     })
   }
-  
+
   const formats = Array.from(qualityMap.values())
     .filter(f => f.url)
     .sort((a, b) => (b.height || 0) - (a.height || 0))
-  
+
   return {
     id: detail.aweme_id,
     title: detail.desc || '抖音视频',
@@ -915,6 +976,386 @@ async function parseDouyinWithPuppeteer(url: string): Promise<any> {
     }
 
     return videoInfo
+  } finally {
+    await browser.close()
+  }
+}
+
+// 使用 CDP 拦截媒体流解析抖音视频（借鉴 situxirui/douyin-video-downloader 的思路）
+// 不依赖签名接口：由真实浏览器完成页面加载和鉴权，直接截获 CDN 音视频流地址。
+// 关键技巧：
+//   1. 免登录入口 https://www.douyin.com/jingxuan?modal_id=<视频ID>
+//   2. Network.requestWillBeSent 拦截 douyinvod.com/zjcdn.com/bytecdn 等媒体流
+//   3. 从正在播放的 <video> 元素读取目标时长，用于排除自动插播的广告
+async function parseDouyinWithCDP(url: string): Promise<any> {
+  let videoId = extractDouyinVideoId(url)
+  if (!videoId) {
+    // 短链接：跟随重定向解析出视频 ID（移动端 UA 更易拿到 /video/<id> 形态）
+    try {
+      const resp = await fetch(url, {
+        redirect: 'follow',
+        method: 'GET',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        },
+      })
+      videoId = extractDouyinVideoId(resp.url)
+    } catch (e) {
+      console.log('[douyin:cdp] 短链接重定向解析失败:', e)
+    }
+  }
+  if (!videoId) {
+    throw new Error('无法从链接提取抖音视频 ID')
+  }
+
+  const chromePath = getChromiumPath()
+  if (!chromePath) {
+    await promptChromeDownload()
+    throw new Error('未检测到 Chrome 浏览器')
+  }
+
+  const browser = await puppeteer.launch({
+    headless: true,
+    executablePath: chromePath,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled',
+      '--autoplay-policy=no-user-gesture-required',
+      '--window-size=1280,720',
+    ],
+  })
+
+  try {
+    const page = await browser.newPage()
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    await page.setViewport({ width: 1280, height: 720 })
+
+    // 通过 CDP 拦截媒体流请求 + 含视频数据的 API 响应
+    const cdp = await page.createCDPSession()
+    await cdp.send('Network.enable', { maxPostDataSize: 65536 })
+    await cdp.send('Page.enable')
+
+    const mediaUrls: string[] = []
+    const directMediaUrls: string[] = []  // type=media 的直链（路径无 media-video 标记时作为视频兜底）
+    let apiDetail: any = null
+
+    cdp.on('Network.requestWillBeSent', (params: any) => {
+      const reqUrl = params?.request?.url || ''
+      const reqType = params?.type || ''
+      if (isDouyinMediaUrl(reqUrl, reqType)) {
+        mediaUrls.push(reqUrl)
+        if (reqType === 'media') directMediaUrls.push(reqUrl)
+        console.log('[douyin:cdp] 捕获媒体流:', reqUrl.split('?')[0].slice(0, 120))
+      }
+    })
+
+    // 浏览器在页面内发出的详情/feed API 带有效签名，从中可拿到全部清晰度地址
+    // 只接受目标视频的详情（按 aweme_id 过滤，排除相关推荐视频的数据）
+    cdp.on('Network.responseReceived', async (params: any) => {
+      const resUrl = params?.response?.url || ''
+      if (!resUrl.includes('/aweme/')) return
+      const mime = params?.response?.mimeType || ''
+      if (!mime.includes('json')) return
+      try {
+        const body = await cdp.send('Network.getResponseBody', { requestId: params.requestId })
+        const data = JSON.parse(body?.body || 'null')
+        const detail = data?.aweme_detail || data?.aweme_list?.[0] || data?.data?.aweme_detail || null
+        if (detail && detail.video && String(detail.aweme_id) === videoId) {
+          apiDetail = detail
+          console.log('[douyin:cdp] 捕获目标视频 API 详情: aweme_id=' + detail.aweme_id)
+        }
+      } catch (e) {
+        // 忽略解析失败
+      }
+    })
+
+    // 主入口：/video/<id> 页面（实测标题/时长与目标视频精确匹配，且会发出带签名的详情 API）
+    // 兜底入口：jingxuan?modal_id=<id>（信息流页面，行为可能变化）
+    let targetUrl = `https://www.douyin.com/video/${videoId}`
+    console.log('[douyin:cdp] 打开页面:', targetUrl)
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+
+    // 等待 API 详情或播放流出现（自动播放策略已放开，最长等 20 秒）
+    let startTime = Date.now()
+    while (Date.now() - startTime < 20000) {
+      if (apiDetail || mediaUrls.some(u => u.includes('media-video'))) break
+      await new Promise(r => setTimeout(r, 500))
+    }
+
+    // 兜底：切换到 jingxuan 入口再试一次
+    if (!apiDetail && !mediaUrls.some(u => u.includes('media-video'))) {
+      targetUrl = `https://www.douyin.com/jingxuan?modal_id=${videoId}`
+      console.log('[douyin:cdp] 切换兜底入口:', targetUrl)
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+      startTime = Date.now()
+      while (Date.now() - startTime < 20000) {
+        if (apiDetail || mediaUrls.some(u => u.includes('media-video'))) break
+        await new Promise(r => setTimeout(r, 500))
+      }
+    }
+
+    // 拿到 API 详情时直接构建完整结果（全清晰度 + 元数据）
+    if (apiDetail) {
+      console.log('[douyin:cdp] 使用 API 详情构建解析结果')
+      return buildDouyinFormats(apiDetail, url)
+    }
+
+    // 读取页面标题和目标时长（正在播放的 <video> 元素）
+    let pageTitle = '抖音视频'
+    let expectedDuration = 0
+    try {
+      const info = await page.evaluate(() => {
+        const vids = [...document.querySelectorAll('video')].map((v: HTMLVideoElement) => ({
+          d: v.duration, p: v.paused, c: v.currentTime,
+        }))
+        // 正在播放且时长有效的元素
+        const playing = vids.filter(v => !v.p && Number.isFinite(v.d) && v.d > 0)
+        return {
+          t: document.title,
+          d: playing.length > 0 ? Math.max(...playing.map(v => v.d)) : 0,
+        }
+      })
+      pageTitle = info.t || pageTitle
+      expectedDuration = info.d || 0
+      console.log('[douyin:cdp] 页面标题:', pageTitle, '| 目标时长:', expectedDuration.toFixed(1) + 's')
+    } catch (e) {
+      console.log('[douyin:cdp] 读取页面信息失败:', e)
+    }
+
+    // 去重（按去除查询串后的 URL）
+    const uniq = new Map<string, string>()
+    for (const u of mediaUrls) {
+      const base = u.split('?')[0]
+      if (!uniq.has(base)) uniq.set(base, u)
+    }
+    const allStreams = [...uniq.values()]
+    const videoStreams = allStreams.filter(u => u.includes('media-video'))
+    const audioStreams = allStreams.filter(u => u.includes('media-audio'))
+
+    // 兜底：新版播放器有时直接以 type=media 请求无标记路径的直链
+    const fallbackVideos = directMediaUrls.filter(u => !u.includes('media-audio') && !videoStreams.includes(u))
+    for (const u of fallbackVideos) {
+      if (!videoStreams.some(v => v.split('?')[0] === u.split('?')[0])) videoStreams.push(u)
+    }
+
+    if (videoStreams.length === 0) {
+      throw new Error('CDP 未捕获到视频流（可能是图文帖或页面结构变化）')
+    }
+
+    // 选择策略：目标视频通常最后被播放，广告流一般先被请求；
+    // 因此候选列表按捕获顺序倒序排列，把最可能的目标流放在第一位。
+    // 更精确的"按时长排除广告"需要下载后 ffprobe 校验，留给批量下载阶段。
+    const videoCandidates = [...videoStreams].reverse()
+    const audioUrl = audioStreams.length > 0 ? audioStreams[audioStreams.length - 1] : undefined
+
+    const formats = videoCandidates.map((v, i) => ({
+      formatId: `cdp_${i}`,
+      quality: i === 0 ? '默认（直链）' : `备选流 ${i + 1}`,
+      ext: 'mp4',
+      filesize: 0,
+      width: 0,
+      height: 0,
+      fps: 30,
+      hasAudio: !!audioUrl,
+      url: v,
+      audioUrl: audioUrl,
+    }))
+
+    return {
+      id: videoId,
+      title: pageTitle.replace(/\s*[-_–—]\s*(抖音|Douyin).*$/i, '').trim() || '抖音视频',
+      description: '',
+      thumbnail: '',
+      duration: Math.floor(expectedDuration),
+      uploader: '',
+      webpageUrl: url,
+      formats: formats,
+      source: 'cdp',
+    }
+  } finally {
+    await browser.close()
+  }
+}
+
+// 解析抖音用户主页（作品/收藏/喜欢），枚举视频列表用于批量下载
+// 原理与单视频 CDP 解析一致：真实浏览器加载页面，拦截列表 API 响应
+// （浏览器自动生成签名），滚动页面触发翻页。
+// user/self 的收藏/喜欢页需要登录态：从设置导入的 cookies.txt 注入浏览器。
+async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<any> {
+  const chromePath = getChromiumPath()
+  if (!chromePath) {
+    await promptChromeDownload()
+    throw new Error('未检测到 Chrome 浏览器')
+  }
+
+  const browser = await puppeteer.launch({
+    headless: true,
+    executablePath: chromePath,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-blink-features=AutomationControlled',
+      '--autoplay-policy=no-user-gesture-required',
+      '--window-size=1280,800',
+    ],
+  })
+
+  try {
+    const page = await browser.newPage()
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+    await page.setViewport({ width: 1280, height: 800 })
+
+    // 登录态：从 cookies.txt 导入（user/self 的收藏/喜欢页需要）
+    if (cookiesFile && fs.existsSync(cookiesFile)) {
+      try {
+        const content = fs.readFileSync(cookiesFile, 'utf8')
+        const cookies = parseNetscapeCookies(content).filter(c => c.domain.includes('douyin.com'))
+        if (cookies.length > 0) {
+          await page.setCookie(...cookies.map(c => ({
+            name: c.name,
+            value: c.value,
+            domain: c.domain,
+            path: c.path || '/',
+          })))
+          console.log('[douyin:profile] 已导入', cookies.length, '条抖音 cookie')
+        }
+      } catch (e) {
+        console.log('[douyin:profile] cookie 导入失败:', e)
+      }
+    }
+
+    const cdp = await page.createCDPSession()
+    await cdp.send('Network.enable', { maxPostDataSize: 65536 })
+
+    // 拦截列表 API 响应：作品 post / 收藏 collection / 喜欢 favorite
+    const videoMap = new Map<string, any>()
+    const listApiPattern = /aweme\/v1\/web\/aweme\/post\/|aweme\/v1\/web\/aweme\/list\/collection\/|favorite\/list\//
+    cdp.on('Network.responseReceived', async (params: any) => {
+      const resUrl = params?.response?.url || ''
+      if (!listApiPattern.test(resUrl)) return
+      if (!(params?.response?.mimeType || '').includes('json')) return
+      try {
+        const body = await cdp.send('Network.getResponseBody', { requestId: params.requestId })
+        const data = JSON.parse(body?.body || 'null')
+        const list = data?.aweme_list || data?.data?.list || []
+        for (const item of list) {
+          if (!item?.aweme_id) continue
+          const v = item.video
+          // 收藏/喜欢接口可能不含 bit_rate，取 play_addr 兜底；都没有则留空（下载时再解析）
+          const brList = v?.bit_rate?.length ? v.bit_rate : []
+          const best = brList[brList.length - 1] || v?.play_addr
+          const bestUrl = best?.play_addr?.url_list?.[0] || v?.play_addr?.url_list?.[0] || ''
+          if (!videoMap.has(item.aweme_id)) {
+            videoMap.set(item.aweme_id, {
+              id: item.aweme_id,
+              title: item.desc || '抖音视频',
+              cover: v?.cover?.url_list?.[0] || v?.dynamic_cover?.url_list?.[0] || '',
+              duration: v?.duration ? Math.floor(v.duration / 1000) : 0,
+              url: `https://www.douyin.com/video/${item.aweme_id}`,
+              directUrl: bestUrl,
+            })
+            console.log('[douyin:profile] 枚举视频:', item.aweme_id, (item.desc || '').slice(0, 30))
+          }
+        }
+      } catch (e) {
+        // 忽略单次解析失败
+      }
+    })
+
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await new Promise(r => setTimeout(r, 5000))
+
+    // 点击"作品"tab（其他用户主页需要；user/self 的收藏页则保持原 tab）
+    const isSelfPage = url.includes('/user/self')
+    if (!isSelfPage) {
+      await page.evaluate(() => {
+        const t = [...document.querySelectorAll('[class*="semi-tabs-tab"], [role="tab"]')].find(
+          (el: Element) => (el.textContent || '').trim() === '作品'
+        ) as HTMLElement | undefined
+        if (t) t.click()
+      })
+      await new Promise(r => setTimeout(r, 4000))
+    }
+
+    // DOM 提取：作品网格已 SSR 渲染在页面里（实测 25 个/页），
+    // 从视频链接 + 封面 img alt 提取标题，作为 API 拦截的兜底与补充
+    const domItems = await page.evaluate(() => {
+      const items: Array<{ id: string; title: string; cover: string; duration: number }> = []
+      const seen = new Set<string>()
+      for (const a of document.querySelectorAll('a[href*="/video/"]')) {
+        const m = a.getAttribute('href')?.match(/\/video\/(\d+)/)
+        if (!m || seen.has(m[1])) continue
+        seen.add(m[1])
+        const li = a.closest('li') || a.parentElement
+        const img = li?.querySelector('img')
+        items.push({
+          id: m[1],
+          title: (img?.getAttribute('alt') || '').replace(/^[^：:]*[：:]/, '').trim() || '抖音视频',
+          cover: img?.src || '',
+          duration: 0,
+        })
+      }
+      return items
+    })
+    for (const item of domItems) {
+      if (!videoMap.has(item.id)) {
+        videoMap.set(item.id, {
+          id: item.id,
+          title: item.title,
+          cover: item.cover,
+          duration: item.duration,
+          url: `https://www.douyin.com/video/${item.id}`,
+          directUrl: '',
+        })
+        console.log('[douyin:profile] DOM 枚举视频:', item.id, item.title.slice(0, 30))
+      } else if (!videoMap.get(item.id).cover && item.cover) {
+        videoMap.get(item.id).cover = item.cover
+      }
+    }
+
+    // 滚动尝试触发更多分页（当前抖音版本无头模式下通常只加载第一页）
+    for (let i = 0; i < 6; i++) {
+      const before = videoMap.size
+      await page.evaluate(() => { window.scrollTo(0, document.body.scrollHeight) })
+      await new Promise(r => setTimeout(r, 2000))
+      if (videoMap.size === before) break
+    }
+
+    const videos = [...videoMap.values()]
+    if (videos.length === 0) {
+      throw new Error('未枚举到视频（user/self 的收藏/喜欢页需要登录态：请在设置中导入 cookies.txt 后重试）')
+    }
+
+    // 作者昵称
+    let authorName = ''
+    try {
+      authorName = await page.evaluate(() => {
+        const el = document.querySelector('[data-e2e="user-name"], [data-e2e="user-title"], h1, .user-name')
+        return el?.textContent?.trim() || ''
+      })
+    } catch (e) {
+      // 忽略
+    }
+
+    console.log('[douyin:profile] 枚举完成:', videos.length, '个视频')
+    return {
+      id: 'profile',
+      title: authorName || '抖音主页',
+      description: '',
+      thumbnail: videos[0]?.cover || '',
+      duration: 0,
+      uploader: authorName || '',
+      webpageUrl: url,
+      formats: [],
+      isBatch: true,
+      batchVideos: videos,
+      source: 'douyin-profile',
+    }
   } finally {
     await browser.close()
   }
@@ -1888,16 +2329,32 @@ function runYtDlp(args: string[]): Promise<{ code: number | null; output: string
 }
 
 ipcMain.handle('ytdlp:parse', async (_event, ...args) => {
-  const url = args[0] as string
+  let url = args[0] as string
   const cookiesFile = args[1] as string | undefined
-  // 如果是抖音链接，优先使用 API 解析
+  // 从分享口令/整段文本中提取抖音链接（纯数字视为视频 ID）
+  const extractedUrl = extractDouyinUrl(url)
+  if (extractedUrl !== url) {
+    console.log('[ytdlp:parse] 从分享文本提取抖音链接:', extractedUrl.slice(0, 120))
+    url = extractedUrl
+  }
+  // 抖音用户主页：枚举视频列表（批量下载）
+  if (isDouyinProfileUrl(url)) {
+    return await parseDouyinProfile(url, cookiesFile)
+  }
+  // 如果是抖音链接，优先使用 API 解析，失败依次回退 CDP 媒体流拦截、SSR 解析
   if (isDouyinUrl(url)) {
     try {
       return await parseDouyinWithAPI(url)
-    } catch (e: any) {
+    } catch (e1: any) {
+      console.log('[ytdlp:parse] 抖音 API 解析失败，回退 CDP 拦截:', e1?.message || e1)
       try {
-        return await parseDouyinWithPuppeteer(url)
+        return await parseDouyinWithCDP(url)
       } catch (e2: any) {
+        console.log('[ytdlp:parse] 抖音 CDP 拦截失败，回退 Puppeteer SSR:', e2?.message || e2)
+        try {
+          return await parseDouyinWithPuppeteer(url)
+        } catch (e3: any) {
+        }
       }
     }
   }
@@ -2287,6 +2744,34 @@ async function downloadDirectFile(url: string, outputPath: string, taskId: strin
   })
 }
 
+// 下载分离的音视频直链并合并（用于抖音 CDP 拦截到的音视频分离流）
+async function downloadDirectWithMerge(videoUrl: string, audioUrl: string, outputPath: string, taskId: string): Promise<void> {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'videdown-'))
+  const videoTemp = path.join(tempDir, 'video.mp4')
+  const audioTemp = path.join(tempDir, 'audio.mp4')
+  try {
+    // 分别下载视频轨和音频轨
+    await downloadDirectFile(videoUrl, videoTemp, taskId)
+    await downloadDirectFile(audioUrl, audioTemp, taskId)
+
+    // ffmpeg 合并（视频流复制、音频转 AAC、按时长短者截断）
+    sendDownloadProgress({ taskId, url: videoUrl, percent: 100, status: 'merging' })
+    const ffmpegPath = getFfmpegPath()
+    await new Promise<void>((resolveMerge, rejectMerge) => {
+      const proc = spawn(ffmpegPath, ['-i', videoTemp, '-i', audioTemp, '-c:v', 'copy', '-c:a', 'aac', '-shortest', '-y', outputPath])
+      let err = ''
+      proc.stderr?.on('data', (d: Buffer) => { err += d.toString() })
+      proc.on('close', (code) => {
+        if (code === 0) resolveMerge()
+        else rejectMerge(new Error('音视频合并失败: ' + err.slice(-300)))
+      })
+    })
+    sendDownloadProgress({ taskId, url: videoUrl, percent: 100, status: 'completed' })
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  }
+}
+
 // 下载视频（使用最佳格式，自动合并音视频）
 ipcMain.handle('ytdlp:download', async (_event, options: {
   url: string
@@ -2295,6 +2780,7 @@ ipcMain.handle('ytdlp:download', async (_event, options: {
   filename?: string
   taskId: string
   directUrl?: string
+  audioUrl?: string
   cookiesFile?: string
   downloadMode?: 'video' | 'audio' | 'subtitle'
   audioTrack?: any
@@ -2303,14 +2789,19 @@ ipcMain.handle('ytdlp:download', async (_event, options: {
 }) => {
   return new Promise(async (resolve, reject) => {
     const outputDir = ensureDownloadDir(options.outputDir)
-    
+
     // 如果有直接下载链接（抖音），使用直接下载
     if (options.directUrl) {
       const filename = options.filename || `video_${Date.now()}.mp4`
       const outputPath = path.join(outputDir, filename)
 
       try {
-        await downloadDirectFile(options.directUrl, outputPath, options.taskId)
+        if (options.audioUrl) {
+          // CDP 拦截到的音视频分离流：分别下载后 ffmpeg 合并
+          await downloadDirectWithMerge(options.directUrl, options.audioUrl, outputPath, options.taskId)
+        } else {
+          await downloadDirectFile(options.directUrl, outputPath, options.taskId)
+        }
         resolve({ filePath: outputPath })
         return
       } catch (e: any) {
@@ -2664,7 +3155,7 @@ ipcMain.handle('history:get', async () => {
 
 ipcMain.handle('history:add', async (_, record: any) => {
   try {
-    let history = []
+    let history: any[] = []
     if (fs.existsSync(historyFile)) {
       const data = fs.readFileSync(historyFile, 'utf8')
       history = JSON.parse(data)
@@ -2692,7 +3183,7 @@ ipcMain.handle('history:add', async (_, record: any) => {
 
 ipcMain.handle('history:delete', async (_, id: string) => {
   try {
-    let history = []
+    let history: any[] = []
     if (fs.existsSync(historyFile)) {
       const data = fs.readFileSync(historyFile, 'utf8')
       history = JSON.parse(data)
