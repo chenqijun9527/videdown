@@ -1,5 +1,6 @@
+allowBuilds:
+  electron: true
+  esbuild: true
 ignoredBuiltDependencies:
   - bufferutil
-  - electron
-  - esbuild
   - utf-8-validate
