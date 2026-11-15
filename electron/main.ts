@@ -1265,9 +1265,10 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
         for (const item of list) {
           if (!item?.aweme_id) continue
           const v = item.video
-          // 收藏/喜欢接口可能不含 bit_rate，取 play_addr 兜底；都没有则留空（下载时再解析）
+          // bit_rate 数组顺序为 normal_最高清 → ... → adapt_lower_最低清，
+          // 必须取第一项（normal 档最高清）；无 bit_rate 时用 play_addr 兜底
           const brList = v?.bit_rate?.length ? v.bit_rate : []
-          const best = brList[brList.length - 1] || v?.play_addr
+          const best = brList[0] || v?.play_addr
           const bestUrl = best?.play_addr?.url_list?.[0] || v?.play_addr?.url_list?.[0] || ''
           const stats = item.statistics || {}
           if (!videoMap.has(item.aweme_id)) {
