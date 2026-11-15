@@ -1309,22 +1309,28 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       showTab === 'post' ? '作品' : '作品'
     const clickedTab = await page.evaluate((tabName: string) => {
       const tabs = [...document.querySelectorAll('[class*="semi-tabs-tab"], [role="tab"]')] as HTMLElement[]
-      // tab 文本可能是 "作品53"（带数量），用前缀匹配
-      const t = tabs.find(el => (el.textContent || '').trim().startsWith(tabName))
-      if (t) {
-        t.click()
-        return (t.textContent || '').trim().slice(0, 10)
+      // tab 文本可能是 "作品310"（带数量），用前缀匹配；页面上可能同时存在
+      // 头部行 tab 和内容区 tab，全部点击保证切换生效
+      const matched = tabs.filter(el => (el.textContent || '').trim().startsWith(tabName))
+      let clickedText = ''
+      for (const t of matched) {
+        try {
+          t.click()
+          clickedText = (t.textContent || '').trim().slice(0, 10)
+        } catch (e) {
+          // 忽略不可点击元素
+        }
       }
-      return ''
+      return clickedText
     }, targetTabName)
     console.log('[douyin:profile] 目标 tab:', targetTabName, '| 实际点击:', clickedTab || '(未找到，使用页面默认)')
-    await new Promise(r => setTimeout(r, 4000))
+    await new Promise(r => setTimeout(r, 6000))
 
-    // DOM 提取：作品网格已 SSR 渲染在页面里（实测 25 个/页），
-    // 从视频链接 + 封面 img alt 提取标题，作为 API 拦截的兜底与补充。
+    // DOM 提取：作品网格渲染在页面里，从视频链接 + 封面 img alt 提取标题，
+    // 作为 API 拦截的兜底与补充。
     // 注意：页脚 user-page-footer 区块有推荐视频（老视频/无 alt），必须排除，
     // 否则批量列表会混入 8 个与作品无关的推荐视频
-    const domItems = await page.evaluate(() => {
+    const extractDomItems = () => page.evaluate(() => {
       const items: Array<{ id: string; title: string; cover: string; duration: number }> = []
       const seen = new Set<string>()
       for (const a of document.querySelectorAll('a[href*="/video/"]')) {
@@ -1349,21 +1355,24 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       }
       return items
     })
-    for (const item of domItems) {
-      if (!videoMap.has(item.id)) {
-        videoMap.set(item.id, {
-          id: item.id,
-          title: item.title,
-          cover: item.cover,
-          duration: item.duration,
-          url: `https://www.douyin.com/video/${item.id}`,
-          directUrl: '',
-        })
-        console.log('[douyin:profile] DOM 枚举视频:', item.id, item.title.slice(0, 30))
-      } else if (!videoMap.get(item.id).cover && item.cover) {
-        videoMap.get(item.id).cover = item.cover
+    const mergeDomItems = (domItems: Array<{ id: string; title: string; cover: string; duration: number }>) => {
+      for (const item of domItems) {
+        if (!videoMap.has(item.id)) {
+          videoMap.set(item.id, {
+            id: item.id,
+            title: item.title,
+            cover: item.cover,
+            duration: item.duration,
+            url: `https://www.douyin.com/video/${item.id}`,
+            directUrl: '',
+          })
+          console.log('[douyin:profile] DOM 枚举视频:', item.id, item.title.slice(0, 30))
+        } else if (!videoMap.get(item.id).cover && item.cover) {
+          videoMap.get(item.id).cover = item.cover
+        }
       }
     }
+    mergeDomItems(await extractDomItems())
 
     // 滚动尝试触发更多分页（当前抖音版本虚拟滚动 + 签名校验，无头模式通常只能拿到第一页）
     for (let i = 0; i < 6; i++) {
@@ -1377,6 +1386,8 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       await new Promise(r => setTimeout(r, 2000))
       if (videoMap.size === before) break
     }
+    // 滚动后页面可能渲染了更多卡片，再提取一次兜底
+    mergeDomItems(await extractDomItems())
 
     let videos = [...videoMap.values()]
     if (videos.length === 0) {
