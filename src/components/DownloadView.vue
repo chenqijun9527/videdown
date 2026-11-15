@@ -160,6 +160,20 @@
               </div>
             </div>
 
+            <!-- 登录墙提示：未登录只能看第一页 -->
+            <div v-if="batchResult.loginWall" class="flex items-start gap-2 p-3 bg-amber-container/30 rounded-md border border-amber/30">
+              <MaterialIcon name="info" :size="16" class="text-amber flex-shrink-0 mt-0.5" />
+              <p class="text-xs text-on-surface leading-relaxed">
+                未登录状态抖音只开放第一页作品
+                <template v-if="batchResult.totalWorks">（已获取 {{ batchResult.batchVideos?.length || 0 }} / {{ batchResult.totalWorks }} 个）</template>。
+                用 Get cookies.txt 插件在已登录的抖音网页导出 cookies，到设置中导入后重新解析，即可获取全部作品。
+                <button
+                  class="ml-1 text-amber underline underline-offset-2 hover:text-amber/80 transition-colors"
+                  @click="goToSettings"
+                >去设置导入</button>
+              </p>
+            </div>
+
             <!-- 列表来源切换：作品 / 喜欢 / 收藏 + 排序 -->
             <div class="flex items-center gap-2 flex-wrap">
               <span class="text-[11px] text-on-surface-variant">列表来源：</span>

@@ -1403,6 +1403,30 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       return (b.collectCount || 0) - (a.collectCount || 0)
     })
 
+    // 检测登录墙：未登录时抖音只展示第一页作品，底部有"登录后查看更多作品"提示
+    let loginWall = false
+    let totalWorks = 0
+    try {
+      const wallInfo = await page.evaluate(() => {
+        let wall = false
+        for (const el of document.querySelectorAll('div, span')) {
+          const txt = (el.textContent || '').trim()
+          if (txt.includes('登录后查看更多')) { wall = true; break }
+        }
+        // 从 tab 文本提取总作品数（如"作品310"）
+        let total = 0
+        for (const el of document.querySelectorAll('[class*="semi-tabs-tab"], [role="tab"]')) {
+          const m = (el.textContent || '').match(/^作品(\d+)/)
+          if (m) { total = parseInt(m[1]); break }
+        }
+        return { wall, total }
+      })
+      loginWall = wallInfo?.wall || false
+      totalWorks = wallInfo?.total || 0
+    } catch (e) {
+      // 忽略
+    }
+
     // 作者昵称
     let authorName = ''
     try {
@@ -1414,7 +1438,7 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       // 忽略
     }
 
-    console.log('[douyin:profile] 枚举完成:', videos.length, '个视频（默认按热度排序）')
+    console.log('[douyin:profile] 枚举完成:', videos.length, '个视频（默认按热度排序）| 登录墙:', loginWall, '| 总作品:', totalWorks)
     return {
       id: 'profile',
       title: authorName || '抖音主页',
@@ -1427,6 +1451,8 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       isBatch: true,
       batchTab: showTab,
       batchVideos: videos,
+      loginWall: loginWall,
+      totalWorks: totalWorks,
       source: 'douyin-profile',
     }
   } finally {

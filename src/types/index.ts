@@ -50,6 +50,8 @@ export interface VideoInfo {
   isBatch?: boolean
   batchVideos?: BatchVideo[]
   batchTab?: string  // 批量枚举来源：post（作品）/ like（喜欢）/ favorite_collection（收藏）
+  loginWall?: boolean  // 未登录受限：抖音只展示第一页作品
+  totalWorks?: number  // 作者总作品数（从 tab 文本提取）
 }
 
 // 批量下载的视频条目（抖音主页枚举结果）
