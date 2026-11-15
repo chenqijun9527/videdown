@@ -210,8 +210,20 @@
               </button>
             </div>
 
-            <div class="flex items-center justify-between">
-              <span class="text-[11px] font-mono text-on-surface-variant">已选 {{ selectedBatchIds.size }} 个</span>
+            <div class="flex items-center justify-between gap-2 flex-wrap">
+              <div class="flex items-center gap-1.5">
+                <span class="text-[11px] font-mono text-on-surface-variant">已选 {{ selectedBatchIds.size }} 个</span>
+                <span class="text-[11px] text-on-surface-variant ml-1">勾选前</span>
+                <input
+                  v-model="batchSelectCount"
+                  type="text"
+                  inputmode="numeric"
+                  placeholder="全部"
+                  class="w-14 px-1.5 py-0.5 text-[11px] font-mono rounded border border-outline-variant/30 bg-surface-container-lowest text-on-surface outline-none focus:border-primary/50"
+                  @input="applyBatchSelectCount"
+                />
+                <span class="text-[11px] text-on-surface-variant">个</span>
+              </div>
               <button
                 class="flex items-center gap-2 px-4 py-2 rounded-md h-9 font-headline font-semibold text-sm transition-all border-2 bg-tertiary-container/40 text-tertiary border-tertiary/30 hover:bg-tertiary-container/60 hover:border-tertiary/50 disabled:opacity-50 disabled:cursor-not-allowed"
                 :disabled="selectedBatchIds.size === 0 || isBatchDownloading"
@@ -628,6 +640,29 @@ const batchTabs = [
 ]
 const activeBatchTab = computed(() => batchResult.value?.batchTab || 'post')
 const batchSortMode = ref<'hot' | 'time'>('hot')
+// 勾选前 N 个的输入（空 = 保持默认全选）
+const batchSelectCount = ref('')
+
+// 按"勾选前 N 个"输入更新选中集合：空输入恢复全选，超出总数自动截断
+function applyBatchSelectCount() {
+  const list = batchResult.value?.batchVideos
+  if (!list || list.length === 0) return
+  const raw = batchSelectCount.value.trim()
+  if (!raw) {
+    selectedBatchIds.value = new Set(list.map(v => v.id))
+    return
+  }
+  let n = parseInt(raw, 10)
+  if (isNaN(n) || n < 1) {
+    n = 1
+    batchSelectCount.value = '1'
+  }
+  if (n > list.length) {
+    n = list.length
+    batchSelectCount.value = String(n)
+  }
+  selectedBatchIds.value = new Set(list.slice(0, n).map(v => v.id))
+}
 
 // 批量列表排序：热度（点赞→收藏）或时间（最新在前）
 function setBatchSort(mode: 'hot' | 'time') {
@@ -644,6 +679,8 @@ function setBatchSort(mode: 'hot' | 'time') {
   } else {
     list.sort((a, b) => (b.createTime || 0) - (a.createTime || 0))
   }
+  // 排序后重新应用"勾选前 N 个"（若已输入）
+  if (batchSelectCount.value.trim()) applyBatchSelectCount()
 }
 
 // 数字缩写：12051 -> 1.2万
@@ -932,6 +969,7 @@ async function parseVideo() {
     if (info.isBatch && info.batchVideos && info.batchVideos.length > 0) {
       batchResult.value = info
       selectedBatchIds.value = new Set(info.batchVideos.map((v: BatchVideo) => v.id))
+      batchSelectCount.value = ''
       videoInfo.value = null
       parseProgress.value = 100
       return
