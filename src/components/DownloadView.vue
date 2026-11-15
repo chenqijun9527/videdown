@@ -252,6 +252,9 @@
                   :style="{ backgroundImage: `url(${item.cover})` }"
                 />
                 <span class="text-xs text-on-surface line-clamp-1 flex-1">{{ item.title }}</span>
+                <span v-if="item.qualityLabel" class="text-[10px] font-mono font-bold text-tertiary bg-tertiary-container/40 px-1 rounded-sm flex-shrink-0" :title="`下载清晰度 ${item.qualityLabel}`">
+                  {{ item.qualityLabel }}
+                </span>
                 <span v-if="item.diggCount" class="text-[10px] font-mono text-primary flex-shrink-0 flex items-center gap-0.5" :title="`点赞 ${item.diggCount}`">
                   <MaterialIcon name="favorite" :size="11" />{{ formatCount(item.diggCount) }}
                 </span>
@@ -1156,7 +1159,7 @@ async function startBatchDownload() {
       if (item.directUrl) {
         selectedFormat = {
           formatId: 'direct',
-          quality: '默认',
+          quality: item.qualityLabel || '默认',
           ext: 'mp4',
           filesize: 0,
           width: 0,

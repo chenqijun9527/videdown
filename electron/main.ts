@@ -187,6 +187,30 @@ function isDouyinProfileUrl(url: string): boolean {
   return /douyin\.com\/(?:share\/)?user\//.test(url)
 }
 
+// 从 bit_rate 数组里挑最高清的流：
+// 优先 normal 档（完整画质，gear_name 形如 normal_1440_0），
+// 分辨率优先（1440 > 1080 > 720 > 540），同分辨率比文件大小；
+// 无 normal 档时在所有档里按同样规则挑
+function pickBestDouyinStream(brList: any[]): any {
+  if (!brList || brList.length === 0) return null
+  const parseRes = (gear: string): number => {
+    const m = /(\d+)/.exec(gear || '')
+    return m ? parseInt(m[1], 10) : 0
+  }
+  const normals = brList.filter(br => (br.gear_name || '').startsWith('normal'))
+  const pool = normals.length > 0 ? normals : brList
+  let best = pool[0]
+  let bestRes = -1
+  for (const br of pool) {
+    const res = parseRes(br.gear_name)
+    if (res > bestRes || (res === bestRes && (br.data_size || 0) > (best?.data_size || 0))) {
+      best = br
+      bestRes = res
+    }
+  }
+  return best
+}
+
 // 解析 Netscape 格式 cookies 文件（Get cookies.txt 扩展导出的格式）
 function parseNetscapeCookies(content: string): Array<{ domain: string; path: string; name: string; value: string }> {
   const cookies: Array<{ domain: string; path: string; name: string; value: string }> = []
@@ -1265,13 +1289,14 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
         for (const item of list) {
           if (!item?.aweme_id) continue
           const v = item.video
-          // bit_rate 数组顺序为 normal_最高清 → ... → adapt_lower_最低清，
-          // 必须取第一项（normal 档最高清）；无 bit_rate 时用 play_addr 兜底
-          const brList = v?.bit_rate?.length ? v.bit_rate : []
-          const best = brList[0] || v?.play_addr
+          // 每个作品挑它自己的最高清晰度直链（normal 档，1440 > 1080 > 720 > 540）；
+          // 无 bit_rate 时用 play_addr 兜底
+          const best = pickBestDouyinStream(v?.bit_rate) || v?.play_addr
           const bestUrl = best?.play_addr?.url_list?.[0] || v?.play_addr?.url_list?.[0] || ''
           const stats = item.statistics || {}
           if (!videoMap.has(item.aweme_id)) {
+            const resMatch = /(\d+)/.exec(best?.gear_name || '')
+            const qualityLabel = resMatch ? `${resMatch[1]}p` : ''
             videoMap.set(item.aweme_id, {
               id: item.aweme_id,
               title: item.desc || '抖音视频',
@@ -1279,13 +1304,14 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
               duration: v?.duration ? Math.floor(v.duration / 1000) : 0,
               url: `https://www.douyin.com/video/${item.aweme_id}`,
               directUrl: bestUrl,
+              qualityLabel: qualityLabel,
               // 热度数据：用于排序
               diggCount: stats.digg_count || 0,
               collectCount: stats.collect_count || 0,
               commentCount: stats.comment_count || 0,
               createTime: item.create_time || 0,
             })
-            console.log('[douyin:profile] API 枚举视频:', item.aweme_id, '| 赞:', stats.digg_count || 0, '| 藏:', stats.collect_count || 0, '|', (item.desc || '').slice(0, 25))
+            console.log('[douyin:profile] API 枚举视频:', item.aweme_id, '| 清晰度:', qualityLabel || '未知', '| 赞:', stats.digg_count || 0, '|', (item.desc || '').slice(0, 25))
           }
         }
       } catch (e) {

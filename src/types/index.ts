@@ -62,6 +62,7 @@ export interface BatchVideo {
   duration?: number
   url: string
   directUrl?: string
+  qualityLabel?: string // 直链清晰度标签，如 "1080p"
   diggCount?: number    // 点赞数
   collectCount?: number // 收藏数
   commentCount?: number // 评论数
