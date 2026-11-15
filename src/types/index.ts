@@ -60,6 +60,10 @@ export interface BatchVideo {
   duration?: number
   url: string
   directUrl?: string
+  diggCount?: number    // 点赞数
+  collectCount?: number // 收藏数
+  commentCount?: number // 评论数
+  createTime?: number   // 发布时间（秒级时间戳）
 }
 
 export interface DownloadTask {

@@ -160,8 +160,8 @@
               </div>
             </div>
 
-            <!-- 列表来源切换：作品 / 喜欢 / 收藏 -->
-            <div class="flex items-center gap-2">
+            <!-- 列表来源切换：作品 / 喜欢 / 收藏 + 排序 -->
+            <div class="flex items-center gap-2 flex-wrap">
               <span class="text-[11px] text-on-surface-variant">列表来源：</span>
               <button
                 v-for="tab in batchTabs"
@@ -174,6 +174,25 @@
                 @click="switchBatchTab(tab.value)"
               >
                 {{ tab.label }}
+              </button>
+              <span class="text-[11px] text-on-surface-variant ml-auto">排序：</span>
+              <button
+                class="px-2.5 py-1 text-[11px] font-semibold rounded-full border transition-colors"
+                :class="batchSortMode === 'hot'
+                  ? 'bg-primary-container text-on-primary-container border-primary/40'
+                  : 'bg-surface-container-lowest text-on-surface-variant border-outline-variant/20 hover:border-primary/40'"
+                @click="setBatchSort('hot')"
+              >
+                热度
+              </button>
+              <button
+                class="px-2.5 py-1 text-[11px] font-semibold rounded-full border transition-colors"
+                :class="batchSortMode === 'time'
+                  ? 'bg-primary-container text-on-primary-container border-primary/40'
+                  : 'bg-surface-container-lowest text-on-surface-variant border-outline-variant/20 hover:border-primary/40'"
+                @click="setBatchSort('time')"
+              >
+                时间
               </button>
             </div>
 
@@ -207,6 +226,12 @@
                   :style="{ backgroundImage: `url(${item.cover})` }"
                 />
                 <span class="text-xs text-on-surface line-clamp-1 flex-1">{{ item.title }}</span>
+                <span v-if="item.diggCount" class="text-[10px] font-mono text-primary flex-shrink-0 flex items-center gap-0.5" :title="`点赞 ${item.diggCount}`">
+                  <MaterialIcon name="favorite" :size="11" />{{ formatCount(item.diggCount) }}
+                </span>
+                <span v-if="item.collectCount" class="text-[10px] font-mono text-tertiary flex-shrink-0" :title="`收藏 ${item.collectCount}`">
+                  {{ formatCount(item.collectCount) }}★
+                </span>
                 <span v-if="item.duration" class="text-[10px] font-mono text-on-surface-variant flex-shrink-0">
                   {{ formatDuration(item.duration) }}
                 </span>
@@ -588,6 +613,30 @@ const batchTabs = [
   { label: '收藏', value: 'favorite_collection' },
 ]
 const activeBatchTab = computed(() => batchResult.value?.batchTab || 'post')
+const batchSortMode = ref<'hot' | 'time'>('hot')
+
+// 批量列表排序：热度（点赞→收藏）或时间（最新在前）
+function setBatchSort(mode: 'hot' | 'time') {
+  batchSortMode.value = mode
+  const list = batchResult.value?.batchVideos
+  if (!list) return
+  if (mode === 'hot') {
+    list.sort((a, b) => {
+      const ad = a.diggCount || 0
+      const bd = b.diggCount || 0
+      if (ad !== bd) return bd - ad
+      return (b.collectCount || 0) - (a.collectCount || 0)
+    })
+  } else {
+    list.sort((a, b) => (b.createTime || 0) - (a.createTime || 0))
+  }
+}
+
+// 数字缩写：12051 -> 1.2万
+function formatCount(n: number): string {
+  if (n >= 10000) return (n / 10000).toFixed(1).replace(/\.0$/, '') + '万'
+  return String(n)
+}
 
 // 切换批量列表来源：修改主页 URL 的 showTab 参数后重新解析
 function switchBatchTab(tab: string) {

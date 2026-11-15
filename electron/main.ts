@@ -1245,15 +1245,22 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
     await cdp.send('Network.enable', { maxPostDataSize: 65536 })
 
     // 拦截列表 API 响应：作品 post / 收藏 collection / 喜欢 favorite
+    // 用 Fetch 域在页面消费响应体之前截获数据（Network 域经常拿不到已被消费的 body）
     const videoMap = new Map<string, any>()
     const listApiPattern = /aweme\/v1\/web\/aweme\/post\/|aweme\/v1\/web\/aweme\/list\/collection\/|favorite\/list\//
-    cdp.on('Network.responseReceived', async (params: any) => {
-      const resUrl = params?.response?.url || ''
-      if (!listApiPattern.test(resUrl)) return
-      if (!(params?.response?.mimeType || '').includes('json')) return
+    await cdp.send('Fetch.enable', {
+      patterns: [{ urlPattern: '*aweme/*', requestStage: 'Response' }],
+    })
+    cdp.on('Fetch.requestPaused', async (params: any) => {
+      const resUrl = params?.request?.url || ''
       try {
-        const body = await cdp.send('Network.getResponseBody', { requestId: params.requestId })
-        const data = JSON.parse(body?.body || 'null')
+        if (!listApiPattern.test(resUrl)) {
+          await cdp.send('Fetch.continueResponse', { requestId: params.requestId }).catch(() => {})
+          return
+        }
+        const body = await cdp.send('Fetch.getResponseBody', { requestId: params.requestId })
+        const txt = body?.base64Encoded ? Buffer.from(body.body, 'base64').toString('utf8') : (body?.body || '')
+        const data = JSON.parse(txt || 'null')
         const list = data?.aweme_list || data?.data?.list || []
         for (const item of list) {
           if (!item?.aweme_id) continue
@@ -1262,6 +1269,7 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
           const brList = v?.bit_rate?.length ? v.bit_rate : []
           const best = brList[brList.length - 1] || v?.play_addr
           const bestUrl = best?.play_addr?.url_list?.[0] || v?.play_addr?.url_list?.[0] || ''
+          const stats = item.statistics || {}
           if (!videoMap.has(item.aweme_id)) {
             videoMap.set(item.aweme_id, {
               id: item.aweme_id,
@@ -1270,12 +1278,19 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
               duration: v?.duration ? Math.floor(v.duration / 1000) : 0,
               url: `https://www.douyin.com/video/${item.aweme_id}`,
               directUrl: bestUrl,
+              // 热度数据：用于排序
+              diggCount: stats.digg_count || 0,
+              collectCount: stats.collect_count || 0,
+              commentCount: stats.comment_count || 0,
+              createTime: item.create_time || 0,
             })
-            console.log('[douyin:profile] 枚举视频:', item.aweme_id, (item.desc || '').slice(0, 30))
+            console.log('[douyin:profile] API 枚举视频:', item.aweme_id, '| 赞:', stats.digg_count || 0, '| 藏:', stats.collect_count || 0, '|', (item.desc || '').slice(0, 25))
           }
         }
       } catch (e) {
         // 忽略单次解析失败
+      } finally {
+        await cdp.send('Fetch.continueResponse', { requestId: params.requestId }).catch(() => {})
       }
     })
 
@@ -1350,18 +1365,32 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       }
     }
 
-    // 滚动尝试触发更多分页（当前抖音版本无头模式下通常只加载第一页）
+    // 滚动尝试触发更多分页（当前抖音版本虚拟滚动 + 签名校验，无头模式通常只能拿到第一页）
     for (let i = 0; i < 6; i++) {
       const before = videoMap.size
-      await page.evaluate(() => { window.scrollTo(0, document.body.scrollHeight) })
+      await page.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight)
+        // 主内容滚动容器（route-sc）
+        const sc = document.querySelector('[class*="route-sc"]') as HTMLElement | null
+        if (sc) sc.scrollTop = sc.scrollHeight
+      })
       await new Promise(r => setTimeout(r, 2000))
       if (videoMap.size === before) break
     }
 
-    const videos = [...videoMap.values()]
+    let videos = [...videoMap.values()]
     if (videos.length === 0) {
       throw new Error('未枚举到视频（user/self 的收藏/喜欢页需要登录态：请在设置中导入 cookies.txt 后重试）')
     }
+
+    // 默认按热度排序：点赞数优先、收藏数次之；
+    // 无热度数据的条目（DOM 兜底提取）排在后面
+    videos = videos.sort((a, b) => {
+      const ad = a.diggCount || 0
+      const bd = b.diggCount || 0
+      if (ad !== bd) return bd - ad
+      return (b.collectCount || 0) - (a.collectCount || 0)
+    })
 
     // 作者昵称
     let authorName = ''
@@ -1374,7 +1403,7 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       // 忽略
     }
 
-    console.log('[douyin:profile] 枚举完成:', videos.length, '个视频')
+    console.log('[douyin:profile] 枚举完成:', videos.length, '个视频（默认按热度排序）')
     return {
       id: 'profile',
       title: authorName || '抖音主页',
