@@ -1272,6 +1272,8 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
     // 用 Fetch 域在页面消费响应体之前截获数据（Network 域经常拿不到已被消费的 body）
     const videoMap = new Map<string, any>()
     const listApiPattern = /aweme\/v1\/web\/aweme\/post\/|aweme\/v1\/web\/aweme\/list\/collection\/|favorite\/list\//
+    // 记录最近一次列表响应的分页状态，用于判断翻页是否已到底
+    let lastHasMore = true
     await cdp.send('Fetch.enable', {
       patterns: [{ urlPattern: '*aweme/*', requestStage: 'Response' }],
     })
@@ -1285,6 +1287,7 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
         const body = await cdp.send('Fetch.getResponseBody', { requestId: params.requestId })
         const txt = body?.base64Encoded ? Buffer.from(body.body, 'base64').toString('utf8') : (body?.body || '')
         const data = JSON.parse(txt || 'null')
+        lastHasMore = data?.has_more !== 0 && data?.has_more !== false
         const list = data?.aweme_list || data?.data?.list || []
         for (const item of list) {
           if (!item?.aweme_id) continue
@@ -1402,8 +1405,10 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
     }
     mergeDomItems(await extractDomItems())
 
-    // 滚动尝试触发更多分页（当前抖音版本虚拟滚动 + 签名校验，无头模式通常只能拿到第一页）
-    for (let i = 0; i < 6; i++) {
+    // 滚动翻页：登录态下滚动会触发下一页列表 API。
+    // 最多 40 轮；has_more 明确为 false 或连续 4 轮无新增时停止
+    let noNewRounds = 0
+    for (let i = 0; i < 40; i++) {
       const before = videoMap.size
       await page.evaluate(() => {
         window.scrollTo(0, document.body.scrollHeight)
@@ -1412,7 +1417,19 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
         if (sc) sc.scrollTop = sc.scrollHeight
       })
       await new Promise(r => setTimeout(r, 2000))
-      if (videoMap.size === before) break
+      if (!lastHasMore) {
+        console.log('[douyin:profile] 分页已到底（has_more=0），停止滚动')
+        break
+      }
+      if (videoMap.size === before) {
+        noNewRounds++
+        if (noNewRounds >= 4) {
+          console.log('[douyin:profile] 连续 4 轮无新增，停止滚动')
+          break
+        }
+      } else {
+        noNewRounds = 0
+      }
     }
     // 滚动后页面可能渲染了更多卡片，再提取一次兜底
     mergeDomItems(await extractDomItems())
