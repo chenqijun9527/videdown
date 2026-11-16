@@ -1277,10 +1277,23 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
     await cdp.send('Fetch.enable', {
       patterns: [{ urlPattern: '*aweme/*', requestStage: 'Response' }],
     })
+    // 最近一次捕获的详情 API 数据（用于批量升级最高清晰度）
+    let latestDetail: any = null
     cdp.on('Fetch.requestPaused', async (params: any) => {
       const resUrl = params?.request?.url || ''
       try {
         if (!listApiPattern.test(resUrl)) {
+          // 详情接口：记录 aweme_detail（后续升级直链用）
+          if (/aweme\/v1\/web\/aweme\/detail\//.test(resUrl)) {
+            try {
+              const dBody = await cdp.send('Fetch.getResponseBody', { requestId: params.requestId })
+              const dTxt = dBody?.base64Encoded ? Buffer.from(dBody.body, 'base64').toString('utf8') : (dBody?.body || '')
+              const dData = JSON.parse(dTxt || 'null')
+              if (dData?.aweme_detail) latestDetail = dData.aweme_detail
+            } catch (e) {
+              // 忽略
+            }
+          }
           await cdp.send('Fetch.continueResponse', { requestId: params.requestId }).catch(() => {})
           return
         }
@@ -1447,6 +1460,49 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       if (ad !== bd) return bd - ad
       return (b.collectCount || 0) - (a.collectCount || 0)
     })
+
+    // 升级最高清晰度：列表接口不含 1440p 档（封顶 1080p），详情接口才有完整档位。
+    // 在同一浏览器会话内逐个打开视频页拦截详情响应升级直链。
+    // 按热度顺序升级（列表已排序），总时长上限 5 分钟——即使超时，
+    // 用户最可能下载的热门作品也已拿到最高清
+    const upgradeStart = Date.now()
+    let upgraded = 0
+    let upgradeAttempted = 0
+    for (const item of videos) {
+      if (Date.now() - upgradeStart > 5 * 60 * 1000) {
+        console.log('[douyin:profile] 清晰度升级超时（5分钟），剩余', videos.length - upgradeAttempted, '个保持列表直链')
+        break
+      }
+      upgradeAttempted++
+      try {
+        latestDetail = null
+        await page.goto(`https://www.douyin.com/video/${item.id}`, { waitUntil: 'domcontentloaded', timeout: 15000 })
+        const t0 = Date.now()
+        while (Date.now() - t0 < 6000) {
+          if (latestDetail && String(latestDetail.aweme_id) === item.id) break
+          await new Promise(r => setTimeout(r, 400))
+        }
+        const detail = (latestDetail && String(latestDetail.aweme_id) === item.id) ? latestDetail : null
+        if (detail) {
+          const best = pickBestDouyinStream(detail.video?.bit_rate)
+          if (best?.play_addr?.url_list?.[0]) {
+            item.directUrl = best.play_addr.url_list[0]
+            const m = /(\d+)/.exec(best.gear_name || '')
+            if (m) {
+              const newLabel = `${m[1]}p`
+              if (newLabel !== item.qualityLabel) {
+                upgraded++
+                console.log('[douyin:profile] 升级清晰度:', item.id, '|', item.qualityLabel || '无', '→', newLabel)
+              }
+              item.qualityLabel = newLabel
+            }
+          }
+        }
+      } catch (e) {
+        // 单条失败跳过，保留列表直链
+      }
+    }
+    console.log('[douyin:profile] 清晰度升级完成:', upgraded, '个升级 /', upgradeAttempted, '个尝试')
 
     // 检测登录墙：未登录时抖音只展示第一页作品，底部有"登录后查看更多作品"提示
     let loginWall = false
