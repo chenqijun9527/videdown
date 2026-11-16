@@ -1461,6 +1461,41 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
       return (b.collectCount || 0) - (a.collectCount || 0)
     })
 
+    // 页面信息必须在升级循环之前提取（升级循环会跳转到视频页，页面元素会变）：
+    // 登录墙检测、总作品数、作者昵称
+    let loginWall = false
+    let totalWorks = 0
+    try {
+      const wallInfo = await page.evaluate(() => {
+        let wall = false
+        for (const el of document.querySelectorAll('div, span')) {
+          const txt = (el.textContent || '').trim()
+          if (txt.includes('登录后查看更多')) { wall = true; break }
+        }
+        // 从 tab 文本提取总作品数（如"作品310"）
+        let total = 0
+        for (const el of document.querySelectorAll('[class*="semi-tabs-tab"], [role="tab"]')) {
+          const m = (el.textContent || '').match(/^作品(\d+)/)
+          if (m) { total = parseInt(m[1]); break }
+        }
+        return { wall, total }
+      })
+      loginWall = wallInfo?.wall || false
+      totalWorks = wallInfo?.total || 0
+    } catch (e) {
+      // 忽略
+    }
+
+    let authorName = ''
+    try {
+      authorName = await page.evaluate(() => {
+        const el = document.querySelector('[data-e2e="user-name"], [data-e2e="user-title"], h1, .user-name')
+        return el?.textContent?.trim() || ''
+      })
+    } catch (e) {
+      // 忽略
+    }
+
     // 升级最高清晰度：列表接口不含 1440p 档（封顶 1080p），详情接口才有完整档位。
     // 在同一浏览器会话内逐个打开视频页拦截详情响应升级直链。
     // 按热度顺序升级（列表已排序），总时长上限 5 分钟——即使超时，
@@ -1504,42 +1539,7 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
     }
     console.log('[douyin:profile] 清晰度升级完成:', upgraded, '个升级 /', upgradeAttempted, '个尝试')
 
-    // 检测登录墙：未登录时抖音只展示第一页作品，底部有"登录后查看更多作品"提示
-    let loginWall = false
-    let totalWorks = 0
-    try {
-      const wallInfo = await page.evaluate(() => {
-        let wall = false
-        for (const el of document.querySelectorAll('div, span')) {
-          const txt = (el.textContent || '').trim()
-          if (txt.includes('登录后查看更多')) { wall = true; break }
-        }
-        // 从 tab 文本提取总作品数（如"作品310"）
-        let total = 0
-        for (const el of document.querySelectorAll('[class*="semi-tabs-tab"], [role="tab"]')) {
-          const m = (el.textContent || '').match(/^作品(\d+)/)
-          if (m) { total = parseInt(m[1]); break }
-        }
-        return { wall, total }
-      })
-      loginWall = wallInfo?.wall || false
-      totalWorks = wallInfo?.total || 0
-    } catch (e) {
-      // 忽略
-    }
-
-    // 作者昵称
-    let authorName = ''
-    try {
-      authorName = await page.evaluate(() => {
-        const el = document.querySelector('[data-e2e="user-name"], [data-e2e="user-title"], h1, .user-name')
-        return el?.textContent?.trim() || ''
-      })
-    } catch (e) {
-      // 忽略
-    }
-
-    console.log('[douyin:profile] 枚举完成:', videos.length, '个视频（默认按热度排序）| 登录墙:', loginWall, '| 总作品:', totalWorks)
+    console.log('[douyin:profile] 枚举完成:', videos.length, '个视频（默认按热度排序）| 登录墙:', loginWall, '| 总作品:', totalWorks, '| 作者:', authorName || '(未知)')
     return {
       id: 'profile',
       title: authorName || '抖音主页',
