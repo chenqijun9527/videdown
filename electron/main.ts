@@ -1289,10 +1289,11 @@ async function parseDouyinProfile(url: string, cookiesFile?: string): Promise<an
         for (const item of list) {
           if (!item?.aweme_id) continue
           const v = item.video
-          // 每个作品挑它自己的最高清晰度直链（normal 档，1440 > 1080 > 720 > 540）；
-          // 无 bit_rate 时用 play_addr 兜底
-          const best = pickBestDouyinStream(v?.bit_rate) || v?.play_addr
-          const bestUrl = best?.play_addr?.url_list?.[0] || v?.play_addr?.url_list?.[0] || ''
+          // 每个作品挑它自己的最高清晰度直链（normal 档，1440 > 1080 > 720 > 540）
+          const best = pickBestDouyinStream(v?.bit_rate)
+          // bit_rate 为空说明 post 接口裁剪了数据，此时 play_addr 可能是纯音频流
+          // （实测下载后只有声音没有画面）——不留直链，交给单视频解析重新获取完整数据
+          const bestUrl = best?.play_addr?.url_list?.[0] || ''
           const stats = item.statistics || {}
           if (!videoMap.has(item.aweme_id)) {
             const resMatch = /(\d+)/.exec(best?.gear_name || '')
