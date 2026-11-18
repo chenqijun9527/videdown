@@ -3026,7 +3026,18 @@ ipcMain.handle('ytdlp:download', async (_event, options: {
     // 如果有直接下载链接（抖音），使用直接下载
     if (options.directUrl) {
       const filename = options.filename || `video_${Date.now()}.mp4`
-      const outputPath = path.join(outputDir, filename)
+      // 同名文件自动加序号（批量下载时标题相同的作品很常见，避免互相覆盖导致漏下载）
+      let outputPath = path.join(outputDir, filename)
+      if (fs.existsSync(outputPath)) {
+        const ext = path.extname(filename)
+        const base = filename.slice(0, -ext.length)
+        let n = 2
+        while (fs.existsSync(path.join(outputDir, `${base}_${n}${ext}`))) {
+          n++
+        }
+        outputPath = path.join(outputDir, `${base}_${n}${ext}`)
+        console.log('[download] 文件名冲突，改用:', path.basename(outputPath))
+      }
 
       try {
         if (options.audioUrl) {
