@@ -431,31 +431,71 @@
     
     <!-- Right Panel - Task Queue -->
     <section class="w-[45%] bg-surface-container-low flex flex-col pt-6 px-6 pb-6 shadow-ambient z-10 border-l border-outline-variant/10">
-      <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center justify-between mb-3">
         <h2 class="font-headline text-base font-bold text-on-surface">任务队列</h2>
         <div class="flex items-center gap-2">
           <span class="text-[10px] font-mono font-bold text-on-secondary-container bg-secondary-container px-1.5 py-0.5 rounded-sm">
             {{ activeTaskCount }} 进行中
           </span>
-          <button 
+          <button
             class="p-1.5 text-on-surface-variant hover:text-on-surface rounded-sm hover:bg-surface-container-highest transition-colors"
             @click="clearCompletedTasks"
+            title="清除已完成任务"
           >
             <MaterialIcon name="clear_all" :size="18" />
           </button>
         </div>
       </div>
-      
+
+      <!-- 过滤与失败重试工具条 -->
+      <div class="flex items-center gap-2 mb-3 flex-wrap">
+        <button
+          class="px-2.5 py-1 text-[11px] font-semibold rounded-full border transition-colors"
+          :class="taskFilter === 'all'
+            ? 'bg-primary-container text-on-primary-container border-primary/40'
+            : 'bg-surface-container-lowest text-on-surface-variant border-outline-variant/20 hover:border-primary/40'"
+          @click="taskFilter = 'all'"
+        >
+          全部 {{ downloadTasks.length }}
+        </button>
+        <button
+          class="px-2.5 py-1 text-[11px] font-semibold rounded-full border transition-colors"
+          :class="taskFilter === 'error'
+            ? 'bg-error-container text-on-error-container border-error/40'
+            : 'bg-surface-container-lowest text-on-surface-variant border-outline-variant/20 hover:border-error/40'"
+          @click="taskFilter = 'error'"
+        >
+          失败 {{ failedTaskCount }}
+        </button>
+        <template v-if="taskFilter === 'error' && failedTaskCount > 0">
+          <button
+            class="px-2.5 py-1 text-[11px] font-semibold rounded-full border border-outline-variant/30 bg-surface-container-lowest text-on-surface-variant hover:border-primary/40 transition-colors"
+            @click="toggleSelectAllFailed"
+          >
+            {{ allFailedSelected ? '取消全选' : '全选失败' }}
+          </button>
+          <button
+            class="flex items-center gap-1 px-3 py-1 text-[11px] font-semibold rounded-full border-2 bg-tertiary-container/40 text-tertiary border-tertiary/30 hover:bg-tertiary-container/60 hover:border-tertiary/50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            :disabled="selectedTaskIds.size === 0 || isRetrying"
+            @click="retrySelectedTasks"
+          >
+            <MaterialIcon v-if="isRetrying" name="sync" :size="13" class="animate-spin" />
+            <MaterialIcon v-else name="refresh" :size="13" />
+            <span>{{ isRetrying ? '重试中...' : `重试选中 (${selectedTaskIds.size})` }}</span>
+          </button>
+        </template>
+      </div>
+
       <!-- Task List -->
       <div class="flex flex-col gap-3 overflow-y-auto pr-1 pb-4">
-        <div v-if="downloadTasks.length === 0" class="flex flex-col items-center justify-center py-12 text-on-surface-variant">
+        <div v-if="filteredTasks.length === 0" class="flex flex-col items-center justify-center py-12 text-on-surface-variant">
           <MaterialIcon name="download_for_offline" :size="48" class="mb-3 opacity-30" />
-          <p class="text-sm">暂无下载任务</p>
-          <p class="text-xs mt-1 opacity-70">解析视频后点击下载按钮添加任务</p>
+          <p class="text-sm">{{ taskFilter === 'error' ? '没有失败任务' : '暂无下载任务' }}</p>
+          <p class="text-xs mt-1 opacity-70">{{ taskFilter === 'error' ? '所有任务都下载成功了 🎉' : '解析视频后点击下载按钮添加任务' }}</p>
         </div>
-        
-        <div 
-          v-for="task in downloadTasks" 
+
+        <div
+          v-for="task in filteredTasks"
           :key="task.id"
           class="flex flex-col p-3 rounded-md border transition-all"
           :class="{
@@ -467,8 +507,15 @@
           }"
         >
           <div class="flex gap-3">
+            <!-- 失败任务勾选框 -->
+            <div
+              v-if="task.status === 'error'"
+              class="size-4 mt-1 rounded-sm border-2 flex-shrink-0 cursor-pointer transition-colors"
+              :class="selectedTaskIds.has(task.id) ? 'border-primary bg-primary' : 'border-outline-variant bg-surface hover:border-primary/50'"
+              @click="toggleTaskSelect(task.id)"
+            />
             <!-- Thumbnail -->
-            <div 
+            <div
               class="w-20 h-14 rounded-sm bg-surface-variant bg-cover bg-center flex-shrink-0 relative overflow-hidden"
               :style="{ backgroundImage: `url(${task.videoInfo.thumbnail})` }"
             >
@@ -844,6 +891,10 @@ onUnmounted(() => {
 // Download Tasks
 const downloadTasks = ref<DownloadTask[]>([])
 const downloadDir = ref('')
+// 任务队列过滤与失败重试
+const taskFilter = ref<'all' | 'error'>('all')
+const selectedTaskIds = ref<Set<string>>(new Set())
+const isRetrying = ref(false)
 
 // 清理非法文件名字符
 function sanitizeFilename(filename: string): string {
@@ -867,6 +918,17 @@ const platforms = [
 // Computed
 const activeTaskCount = computed(() => {
   return downloadTasks.value.filter(t => t.status === 'downloading' || t.status === 'pending' || t.status === 'merging' || t.status === 'paused').length
+})
+
+const failedTaskCount = computed(() => {
+  return downloadTasks.value.filter(t => t.status === 'error').length
+})
+
+const filteredTasks = computed(() => {
+  if (taskFilter.value === 'error') {
+    return downloadTasks.value.filter(t => t.status === 'error')
+  }
+  return downloadTasks.value
 })
 
 const storageInfo = computed(() => {
@@ -1343,8 +1405,10 @@ async function processDownload(task: DownloadTask) {
       errorMsg = 'FFmpeg 合并失败，请确保 ffmpeg.exe 存在于程序目录'
     } else if (errorMsg.includes('cancel') || errorMsg.includes('abort')) {
       errorMsg = '下载已取消'
+    } else if (errorMsg.includes('[Douyin]') || errorMsg.includes('Douyin')) {
+      errorMsg = '抖音下载失败（网络波动或风控拦截），请稍后重试'
     }
-    
+
     // 更新错误状态到数组（确保响应式）
     const errorIdx = downloadTasks.value.findIndex(t => t.id === task.id)
     if (errorIdx !== -1) {
@@ -1388,10 +1452,89 @@ function resumeTask(task: DownloadTask) {
 
 function removeTask(taskId: string) {
   downloadTasks.value = downloadTasks.value.filter(t => t.id !== taskId)
+  const next = new Set(selectedTaskIds.value)
+  next.delete(taskId)
+  selectedTaskIds.value = next
 }
 
 function clearCompletedTasks() {
   downloadTasks.value = downloadTasks.value.filter(t => t.status !== 'completed')
+}
+
+// ---------- 失败任务勾选与重试 ----------
+
+const allFailedSelected = computed(() => {
+  const failed = downloadTasks.value.filter(t => t.status === 'error')
+  return failed.length > 0 && failed.every(t => selectedTaskIds.value.has(t.id))
+})
+
+function toggleTaskSelect(taskId: string) {
+  const next = new Set(selectedTaskIds.value)
+  if (next.has(taskId)) {
+    next.delete(taskId)
+  } else {
+    next.add(taskId)
+  }
+  selectedTaskIds.value = next
+}
+
+function toggleSelectAllFailed() {
+  const failed = downloadTasks.value.filter(t => t.status === 'error')
+  if (allFailedSelected.value) {
+    selectedTaskIds.value = new Set()
+  } else {
+    selectedTaskIds.value = new Set(failed.map(t => t.id))
+  }
+}
+
+// 重试选中的失败任务：逐个重新下载（解析失败的任务会先重新解析）
+async function retrySelectedTasks() {
+  const targets = downloadTasks.value.filter(t => t.status === 'error' && selectedTaskIds.value.has(t.id))
+  if (targets.length === 0 || isRetrying.value) return
+
+  isRetrying.value = true
+  const settings = JSON.parse(localStorage.getItem('settings') || '{}')
+  const cookiesFile = settings.cookiesFile || ''
+
+  try {
+    for (const t of targets) {
+      const idx = downloadTasks.value.findIndex(x => x.id === t.id)
+      if (idx === -1) continue
+
+      // 解析失败的任务（批量里无直链的条目）：先重新解析拿格式
+      if (t.selectedFormat.formatId === 'error') {
+        downloadTasks.value[idx].status = 'pending'
+        downloadTasks.value[idx].error = undefined
+        downloadTasks.value[idx].progress = 0
+        try {
+          const info = await window.electronAPI.ytdlp.parse(t.url, cookiesFile)
+          if (!info || !info.formats || info.formats.length === 0) {
+            downloadTasks.value[idx].status = 'error'
+            downloadTasks.value[idx].error = '重新解析失败'
+            continue
+          }
+          downloadTasks.value[idx].videoInfo = { ...downloadTasks.value[idx].videoInfo, title: info.title || t.videoInfo.title, formats: info.formats }
+          downloadTasks.value[idx].selectedFormat = info.formats[0]
+        } catch (e: any) {
+          downloadTasks.value[idx].status = 'error'
+          downloadTasks.value[idx].error = e?.message || '重新解析失败'
+          continue
+        }
+      }
+
+      // 重置状态后重新下载
+      const i2 = downloadTasks.value.findIndex(x => x.id === t.id)
+      downloadTasks.value[i2].status = 'pending'
+      downloadTasks.value[i2].error = undefined
+      downloadTasks.value[i2].progress = 0
+      downloadTasks.value[i2].speed = undefined
+      downloadTasks.value[i2].eta = undefined
+      await processDownload(downloadTasks.value[i2])
+    }
+  } finally {
+    isRetrying.value = false
+    selectedTaskIds.value = new Set()
+  }
 }
 
 async function openFileLocation(task: DownloadTask) {

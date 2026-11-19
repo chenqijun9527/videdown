@@ -3039,18 +3039,32 @@ ipcMain.handle('ytdlp:download', async (_event, options: {
         console.log('[download] 文件名冲突，改用:', path.basename(outputPath))
       }
 
-      try {
-        if (options.audioUrl) {
+      // 直链下载（瞬时网络错误自动重试一次，再失败才回退 yt-dlp）
+      const directUrl = options.directUrl
+      const directAudioUrl = options.audioUrl
+      const attemptDirect = async () => {
+        if (directAudioUrl) {
           // CDP 拦截到的音视频分离流：分别下载后 ffmpeg 合并
-          await downloadDirectWithMerge(options.directUrl, options.audioUrl, outputPath, options.taskId)
+          await downloadDirectWithMerge(directUrl, directAudioUrl, outputPath, options.taskId)
         } else {
-          await downloadDirectFile(options.directUrl, outputPath, options.taskId)
+          await downloadDirectFile(directUrl, outputPath, options.taskId)
         }
+      }
+      try {
+        await attemptDirect()
         resolve({ filePath: outputPath })
         return
       } catch (e: any) {
-        // 如果直接下载失败，回退到 yt-dlp
-        console.log('[download] 直链下载失败，回退 yt-dlp:', e?.message || e, '| 直链:', options.directUrl?.slice(0, 100))
+        console.log('[download] 直链下载失败，2秒后自动重试:', e?.message || e)
+        await new Promise(r => setTimeout(r, 2000))
+        try {
+          await attemptDirect()
+          resolve({ filePath: outputPath })
+          return
+        } catch (e2: any) {
+          // 重试仍失败，回退到 yt-dlp
+          console.log('[download] 直链重试仍失败，回退 yt-dlp:', e2?.message || e2, '| 直链:', options.directUrl?.slice(0, 100))
+        }
       }
     }
     
