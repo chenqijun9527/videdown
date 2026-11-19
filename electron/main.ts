@@ -752,6 +752,9 @@ async function parseDouyinWithPuppeteer(url: string): Promise<any> {
       request.continue()
     })
 
+    // 目标视频 ID（用于过滤相关推荐视频的详情响应）
+    const targetVideoId = extractDouyinVideoId(url)
+
     page.on('response', async (response) => {
       const resUrl = response.url()
 
@@ -761,6 +764,11 @@ async function parseDouyinWithPuppeteer(url: string): Promise<any> {
           resUrl.includes('/aweme/v1/multi/aweme/detail/')) {
         try {
           const data = await response.json()
+          // 只接受目标视频的详情（页面可能加载相关推荐视频的详情接口，
+          // 未过滤时会把别的视频信息当成目标返回）
+          if (data?.aweme_detail && targetVideoId && String(data.aweme_detail.aweme_id) !== targetVideoId) {
+            return
+          }
           videoData = data
         } catch (e) {
           // 忽略非 JSON 响应
@@ -1097,23 +1105,23 @@ async function parseDouyinWithCDP(url: string): Promise<any> {
       }
     })
 
-    // 主入口：/video/<id> 页面（实测标题/时长与目标视频精确匹配，且会发出带签名的详情 API）
-    // 兜底入口：jingxuan?modal_id=<id>（信息流页面，行为可能变化）
-    let targetUrl = `https://www.douyin.com/video/${videoId}`
+    // 入口：/video/<id> 页面（页面只播放目标视频，媒体流可信）
+    // 不再使用 jingxuan 信息流入口——其自动播放的是随机视频，
+    // 截到的媒体流可能属于别的视频（实测导致下载内容与链接不符）
+    const targetUrl = `https://www.douyin.com/video/${videoId}`
     console.log('[douyin:cdp] 打开页面:', targetUrl)
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
-    // 等待 API 详情或播放流出现（自动播放策略已放开，最长等 20 秒）
+    // 等待 API 详情或播放流出现（最长 20 秒）
     let startTime = Date.now()
     while (Date.now() - startTime < 20000) {
       if (apiDetail || mediaUrls.some(u => u.includes('media-video'))) break
       await new Promise(r => setTimeout(r, 500))
     }
 
-    // 兜底：切换到 jingxuan 入口再试一次
+    // 未拿到数据：重新加载 /video/ 页面再等一次（详情接口偶发不触发）
     if (!apiDetail && !mediaUrls.some(u => u.includes('media-video'))) {
-      targetUrl = `https://www.douyin.com/jingxuan?modal_id=${videoId}`
-      console.log('[douyin:cdp] 切换兜底入口:', targetUrl)
+      console.log('[douyin:cdp] 首次未捕获，重新加载 /video/ 页面重试')
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
       startTime = Date.now()
       while (Date.now() - startTime < 20000) {
@@ -1170,9 +1178,8 @@ async function parseDouyinWithCDP(url: string): Promise<any> {
       throw new Error('CDP 未捕获到视频流（可能是图文帖或页面结构变化）')
     }
 
-    // 选择策略：目标视频通常最后被播放，广告流一般先被请求；
-    // 因此候选列表按捕获顺序倒序排列，把最可能的目标流放在第一位。
-    // 更精确的"按时长排除广告"需要下载后 ffprobe 校验，留给批量下载阶段。
+    // 选择策略：/video/ 页面只播放目标视频，多条流通常是播放器切换清晰度
+    // 或 MSE 分片请求，去重后取最后捕获的一条即可
     const videoCandidates = [...videoStreams].reverse()
     const audioUrl = audioStreams.length > 0 ? audioStreams[audioStreams.length - 1] : undefined
 
