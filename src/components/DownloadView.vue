@@ -910,7 +910,7 @@ const isCleaningTemp = ref(false)
 // 队列上限：超过后自动移除最早完成的任务，防止任务积压导致界面卡顿
 const MAX_TASKS = 200
 function pushTask(task: DownloadTask) {
-  pushTask(task)
+  downloadTasks.value.unshift(task)
   if (downloadTasks.value.length <= MAX_TASKS) return
   const overflow = downloadTasks.value.length - MAX_TASKS
   // 从队尾（最早添加）找已完成任务移除
