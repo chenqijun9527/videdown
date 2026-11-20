@@ -56,5 +56,7 @@ interface Window {
     }>
     // 菜单事件监听
     onMenuShowAbout: (callback: () => void) => () => void
+    // 清理下载垃圾文件
+    cleanupTempFiles: (dir?: string) => Promise<{ removed: number; freedBytes: number }>
   }
 }

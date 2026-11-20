@@ -80,6 +80,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // 更新检查
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+
+  // 清理下载垃圾文件
+  cleanupTempFiles: (dir?: string) => ipcRenderer.invoke('cleanup:tempFiles', dir),
   
   // 菜单事件监听
   onMenuShowAbout: (callback: () => void) => {

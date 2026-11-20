@@ -229,17 +229,6 @@ function parseNetscapeCookies(content: string): Array<{ domain: string; path: st
   return cookies
 }
 
-// 判断是否是抖音媒体 CDN 流（借鉴 douyin-video-downloader 的 is_media_url，适配新版 MSE 播放器）
-// 新版 PC 播放器用 MSE 拉碎片：路径含 media-video-avc1 / media-audio-und-mp4a，
-// 或直接以 type=media 请求 douyinvod 域名
-function isDouyinMediaUrl(u: string, type?: string): boolean {
-  const hosts = ['douyinvod.com', 'zjcdn.com', 'bytecdn', 'douyinstatic', '/video/tos/']
-  const hostHit = hosts.some(h => u.includes(h))
-  if (!hostHit) return false
-  const pathHit = u.includes('media-video') || u.includes('media-audio')
-  return pathHit || type === 'media' || type === 'fetch'
-}
-
 // 检查是否是快手链接
 function isKuaishouUrl(url: string): boolean {
   return url.includes('kuaishou.com') || url.includes('v.kuaishou.com')
@@ -974,11 +963,15 @@ async function parseDouyinWithPuppeteer(url: string): Promise<any> {
                          document.querySelector('.author') ||
                          document.querySelector('[data-e2e="user-name"]')
 
-        // 尝试获取视频 src
+        // 尝试获取视频 src（只接受 http(s) 直链；
+        // MSE 播放器的 src 是 blob: 地址，主进程无法下载，直接放弃）
         let videoSrc: string | undefined = videoEl?.src
         if (!videoSrc) {
           const sourceEl = videoEl?.querySelector('source')
           videoSrc = sourceEl?.src
+        }
+        if (videoSrc && !/^https?:\/\//.test(videoSrc)) {
+          videoSrc = undefined
         }
 
         return {
@@ -1071,19 +1064,7 @@ async function parseDouyinWithCDP(url: string): Promise<any> {
     await cdp.send('Network.enable', { maxPostDataSize: 65536 })
     await cdp.send('Page.enable')
 
-    const mediaUrls: string[] = []
-    const directMediaUrls: string[] = []  // type=media 的直链（路径无 media-video 标记时作为视频兜底）
     let apiDetail: any = null
-
-    cdp.on('Network.requestWillBeSent', (params: any) => {
-      const reqUrl = params?.request?.url || ''
-      const reqType = params?.type || ''
-      if (isDouyinMediaUrl(reqUrl, reqType)) {
-        mediaUrls.push(reqUrl)
-        if (reqType === 'media') directMediaUrls.push(reqUrl)
-        console.log('[douyin:cdp] 捕获媒体流:', reqUrl.split('?')[0].slice(0, 120))
-      }
-    })
 
     // 浏览器在页面内发出的详情/feed API 带有效签名，从中可拿到全部清晰度地址
     // 只接受目标视频的详情（按 aweme_id 过滤，排除相关推荐视频的数据）
@@ -1105,108 +1086,39 @@ async function parseDouyinWithCDP(url: string): Promise<any> {
       }
     })
 
-    // 入口：/video/<id> 页面（页面只播放目标视频，媒体流可信）
-    // 不再使用 jingxuan 信息流入口——其自动播放的是随机视频，
-    // 截到的媒体流可能属于别的视频（实测导致下载内容与链接不符）
+    // 入口：/video/<id> 页面（只播放目标视频）
     const targetUrl = `https://www.douyin.com/video/${videoId}`
     console.log('[douyin:cdp] 打开页面:', targetUrl)
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
-    // 等待 API 详情或播放流出现（最长 20 秒）
+    // 等待目标视频详情出现（最长 20 秒）
     let startTime = Date.now()
     while (Date.now() - startTime < 20000) {
-      if (apiDetail || mediaUrls.some(u => u.includes('media-video'))) break
+      if (apiDetail) break
       await new Promise(r => setTimeout(r, 500))
     }
 
     // 未拿到数据：重新加载 /video/ 页面再等一次（详情接口偶发不触发）
-    if (!apiDetail && !mediaUrls.some(u => u.includes('media-video'))) {
+    if (!apiDetail) {
       console.log('[douyin:cdp] 首次未捕获，重新加载 /video/ 页面重试')
       await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
       startTime = Date.now()
       while (Date.now() - startTime < 20000) {
-        if (apiDetail || mediaUrls.some(u => u.includes('media-video'))) break
+        if (apiDetail) break
         await new Promise(r => setTimeout(r, 500))
       }
     }
 
-    // 拿到 API 详情时直接构建完整结果（全清晰度 + 元数据）
+    // 只使用详情接口数据（按 aweme_id 验证过是目标视频）。
+    // 媒体流拦截已移除：新版播放器使用 MSE 分片，截获的"媒体流"
+    // 是片段而非完整视频，下载合成后内容损坏或张冠李戴。
+    // 详情接口两次都拿不到就直接失败，让任务队列重试机制兜底。
     if (apiDetail) {
       console.log('[douyin:cdp] 使用 API 详情构建解析结果')
       return buildDouyinFormats(apiDetail, url)
     }
 
-    // 读取页面标题和目标时长（正在播放的 <video> 元素）
-    let pageTitle = '抖音视频'
-    let expectedDuration = 0
-    try {
-      const info = await page.evaluate(() => {
-        const vids = [...document.querySelectorAll('video')].map((v: HTMLVideoElement) => ({
-          d: v.duration, p: v.paused, c: v.currentTime,
-        }))
-        // 正在播放且时长有效的元素
-        const playing = vids.filter(v => !v.p && Number.isFinite(v.d) && v.d > 0)
-        return {
-          t: document.title,
-          d: playing.length > 0 ? Math.max(...playing.map(v => v.d)) : 0,
-        }
-      })
-      pageTitle = info.t || pageTitle
-      expectedDuration = info.d || 0
-      console.log('[douyin:cdp] 页面标题:', pageTitle, '| 目标时长:', expectedDuration.toFixed(1) + 's')
-    } catch (e) {
-      console.log('[douyin:cdp] 读取页面信息失败:', e)
-    }
-
-    // 去重（按去除查询串后的 URL）
-    const uniq = new Map<string, string>()
-    for (const u of mediaUrls) {
-      const base = u.split('?')[0]
-      if (!uniq.has(base)) uniq.set(base, u)
-    }
-    const allStreams = [...uniq.values()]
-    const videoStreams = allStreams.filter(u => u.includes('media-video'))
-    const audioStreams = allStreams.filter(u => u.includes('media-audio'))
-
-    // 兜底：新版播放器有时直接以 type=media 请求无标记路径的直链
-    const fallbackVideos = directMediaUrls.filter(u => !u.includes('media-audio') && !videoStreams.includes(u))
-    for (const u of fallbackVideos) {
-      if (!videoStreams.some(v => v.split('?')[0] === u.split('?')[0])) videoStreams.push(u)
-    }
-
-    if (videoStreams.length === 0) {
-      throw new Error('CDP 未捕获到视频流（可能是图文帖或页面结构变化）')
-    }
-
-    // 选择策略：/video/ 页面只播放目标视频，多条流通常是播放器切换清晰度
-    // 或 MSE 分片请求，去重后取最后捕获的一条即可
-    const videoCandidates = [...videoStreams].reverse()
-    const audioUrl = audioStreams.length > 0 ? audioStreams[audioStreams.length - 1] : undefined
-
-    const formats = videoCandidates.map((v, i) => ({
-      formatId: `cdp_${i}`,
-      quality: i === 0 ? '默认（直链）' : `备选流 ${i + 1}`,
-      ext: 'mp4',
-      filesize: 0,
-      width: 0,
-      height: 0,
-      fps: 30,
-      hasAudio: !!audioUrl,
-      url: v,
-      audioUrl: audioUrl,
-    }))
-
-    return {
-      id: videoId,
-      title: pageTitle.replace(/\s*[-_–—]\s*(抖音|Douyin).*$/i, '').trim() || '抖音视频',
-      description: '',
-      thumbnail: '',
-      duration: Math.floor(expectedDuration),
-      uploader: '',
-      webpageUrl: url,
-      formats: formats,
-      source: 'cdp',
-    }
+    throw new Error('未捕获到目标视频的详情数据（详情接口被风控拦截，请稍后重试）')
   } finally {
     await browser.close()
   }
@@ -3476,14 +3388,14 @@ ipcMain.handle('ytdlp:pauseDownload', async (_, taskId: string) => {
     if (download.setPaused) {
       download.setPaused(true)
     }
-    
+
     // Windows 上需要强制终止进程树
     const { exec } = require('child_process')
     const pid = download.child.pid
-    
+
     // 先尝试正常终止
     download.child.kill()
-    
+
     // Windows 上使用 taskkill 终止进程树
     if (process.platform === 'win32' && pid) {
       exec(`taskkill /pid ${pid} /T /F`, (err: any) => {
@@ -3492,10 +3404,59 @@ ipcMain.handle('ytdlp:pauseDownload', async (_, taskId: string) => {
         }
       })
     }
-    
+
     return true
   }
   return false
+})
+
+// 清理下载产生的垃圾文件：下载目录里的临时分片 + 系统临时目录里的合并残留
+ipcMain.handle('cleanup:tempFiles', async (_event, dir?: string) => {
+  let freedBytes = 0
+  const removedFiles: string[] = []
+
+  const cleanDir = (targetDir: string, patterns: RegExp[]) => {
+    if (!targetDir || !fs.existsSync(targetDir)) return
+    try {
+      for (const f of fs.readdirSync(targetDir)) {
+        try {
+          const full = path.join(targetDir, f)
+          const stat = fs.statSync(full)
+          if (stat.isFile() && patterns.some(p => p.test(f))) {
+            freedBytes += stat.size
+            removedFiles.push(full)
+            fs.unlinkSync(full)
+          } else if (stat.isDirectory() && /^videdown-/.test(f)) {
+            // 合并残留的临时目录
+            const files = fs.readdirSync(full)
+            for (const tf of files) {
+              try {
+                const tfStat = fs.statSync(path.join(full, tf))
+                freedBytes += tfStat.size
+              } catch (e) { /* 忽略 */ }
+            }
+            fs.rmSync(full, { recursive: true, force: true })
+            removedFiles.push(full)
+          }
+        } catch (e) {
+          // 单个文件失败忽略
+        }
+      }
+    } catch (e) {
+      // 目录读取失败忽略
+    }
+  }
+
+  // 下载临时分片：*.part / *.ytdl / *.f*.part / *.f*.ytdl / *.temp
+  const tempPatterns = [/\.part$/, /\.ytdl$/, /\.f\d+\.part$/, /\.f\d+\.ytdl$/, /\.temp$/, /\.crdownload$/]
+  if (dir) {
+    cleanDir(dir, tempPatterns)
+  }
+  // 系统临时目录里的 videdown-* 合并残留目录
+  cleanDir(os.tmpdir(), [])
+
+  console.log('[cleanup] 清理垃圾文件:', removedFiles.length, '个，释放', (freedBytes / 1024 / 1024).toFixed(1), 'MB')
+  return { removed: removedFiles.length, freedBytes }
 })
 
 // 获取带 referer 的图片（用于B站等需要referer的图片）

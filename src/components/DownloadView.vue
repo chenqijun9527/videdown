@@ -444,6 +444,16 @@
           >
             <MaterialIcon name="clear_all" :size="18" />
           </button>
+          <button
+            class="flex items-center gap-1 px-2 py-1.5 text-[10px] font-semibold text-on-surface-variant hover:text-primary rounded-sm hover:bg-surface-container-highest transition-colors"
+            :disabled="isCleaningTemp"
+            @click="cleanupTempFiles"
+            title="清理下载残留的临时分片文件"
+          >
+            <MaterialIcon v-if="isCleaningTemp" name="sync" :size="14" class="animate-spin" />
+            <MaterialIcon v-else name="delete_sweep" :size="14" />
+            <span>清理垃圾</span>
+          </button>
         </div>
       </div>
 
@@ -895,6 +905,25 @@ const downloadDir = ref('')
 const taskFilter = ref<'all' | 'error'>('all')
 const selectedTaskIds = ref<Set<string>>(new Set())
 const isRetrying = ref(false)
+const isCleaningTemp = ref(false)
+
+// 队列上限：超过后自动移除最早完成的任务，防止任务积压导致界面卡顿
+const MAX_TASKS = 200
+function pushTask(task: DownloadTask) {
+  pushTask(task)
+  if (downloadTasks.value.length <= MAX_TASKS) return
+  const overflow = downloadTasks.value.length - MAX_TASKS
+  // 从队尾（最早添加）找已完成任务移除
+  const removeIds = new Set<string>()
+  for (let i = downloadTasks.value.length - 1; i >= 0 && removeIds.size < overflow; i--) {
+    if (downloadTasks.value[i].status === 'completed') {
+      removeIds.add(downloadTasks.value[i].id)
+    }
+  }
+  if (removeIds.size > 0) {
+    downloadTasks.value = downloadTasks.value.filter(t => !removeIds.has(t.id))
+  }
+}
 
 // 清理非法文件名字符
 function sanitizeFilename(filename: string): string {
@@ -1142,7 +1171,7 @@ async function startDownload() {
     ;(task as any).downloadMode = 'subtitle'
     ;(task as any).selectedSubtitles = [...selectedSubtitles.value]
     
-    downloadTasks.value.unshift(task)
+    pushTask(task)
     
     // Start download
     processDownload(task)
@@ -1169,7 +1198,7 @@ async function startDownload() {
   ;(task as any).selectedAudioTrack = selectedAudioTrack.value ? { ...selectedAudioTrack.value } : null
   ;(task as any).selectedSubtitles = []
   
-  downloadTasks.value.unshift(task)
+  pushTask(task)
   
   // Start download
   processDownload(task)
@@ -1249,7 +1278,7 @@ async function startBatchDownload() {
             error: e?.message || '解析失败',
             createdAt: new Date().toISOString(),
           }
-          downloadTasks.value.unshift(task)
+          pushTask(task)
           continue
         }
       }
@@ -1272,7 +1301,7 @@ async function startBatchDownload() {
         progress: 0,
         createdAt: new Date().toISOString(),
       }
-      downloadTasks.value.unshift(task)
+      pushTask(task)
       await processDownload(task)
     }
   } finally {
@@ -1459,6 +1488,25 @@ function removeTask(taskId: string) {
 
 function clearCompletedTasks() {
   downloadTasks.value = downloadTasks.value.filter(t => t.status !== 'completed')
+}
+
+// 清理下载残留的垃圾文件（临时分片、合并残留）
+async function cleanupTempFiles() {
+  if (isCleaningTemp.value) return
+  isCleaningTemp.value = true
+  try {
+    const result = await window.electronAPI.cleanupTempFiles(downloadDir.value)
+    const mb = ((result?.freedBytes || 0) / 1024 / 1024).toFixed(1)
+    if (result?.removed > 0) {
+      alert(`已清理 ${result.removed} 个垃圾文件，释放 ${mb} MB`)
+    } else {
+      alert('没有发现垃圾文件，目录很干净 ✨')
+    }
+  } catch (e: any) {
+    alert('清理失败：' + (e?.message || '未知错误'))
+  } finally {
+    isCleaningTemp.value = false
+  }
 }
 
 // ---------- 失败任务勾选与重试 ----------
