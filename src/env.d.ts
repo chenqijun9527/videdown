@@ -22,7 +22,7 @@ interface Window {
       openExternal: (url: string) => Promise<void>
     }
     ytdlp: {
-      parse: (url: string, cookiesFile?: string) => Promise<any>
+      parse: (url: string, cookiesFile?: string, mode?: 'auto' | 'single' | 'batch') => Promise<any>
       download: (options: {
         url: string
         formatId: string

@@ -1059,7 +1059,8 @@ async function parseDouyinWithCDP(url: string): Promise<any> {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
     await page.setViewport({ width: 1280, height: 720 })
 
-    // 通过 CDP 拦截媒体流请求 + 含视频数据的 API 响应
+    // 用 Fetch 域在页面消费响应体之前截获详情 API 数据
+    // （Network 域经常因响应体已被页面消费而读取失败，导致解析失败率高）
     const cdp = await page.createCDPSession()
     await cdp.send('Network.enable', { maxPostDataSize: 65536 })
     await cdp.send('Page.enable')
@@ -1068,14 +1069,19 @@ async function parseDouyinWithCDP(url: string): Promise<any> {
 
     // 浏览器在页面内发出的详情/feed API 带有效签名，从中可拿到全部清晰度地址
     // 只接受目标视频的详情（按 aweme_id 过滤，排除相关推荐视频的数据）
-    cdp.on('Network.responseReceived', async (params: any) => {
-      const resUrl = params?.response?.url || ''
-      if (!resUrl.includes('/aweme/')) return
-      const mime = params?.response?.mimeType || ''
-      if (!mime.includes('json')) return
+    await cdp.send('Fetch.enable', {
+      patterns: [{ urlPattern: '*aweme*', requestStage: 'Response' }],
+    })
+    cdp.on('Fetch.requestPaused', async (params: any) => {
+      const resUrl = params?.request?.url || ''
       try {
-        const body = await cdp.send('Network.getResponseBody', { requestId: params.requestId })
-        const data = JSON.parse(body?.body || 'null')
+        if (!resUrl.includes('/aweme/')) {
+          await cdp.send('Fetch.continueResponse', { requestId: params.requestId }).catch(() => {})
+          return
+        }
+        const body = await cdp.send('Fetch.getResponseBody', { requestId: params.requestId })
+        const txt = body?.base64Encoded ? Buffer.from(body.body, 'base64').toString('utf8') : (body?.body || '')
+        const data = JSON.parse(txt || 'null')
         const detail = data?.aweme_detail || data?.aweme_list?.[0] || data?.data?.aweme_detail || null
         if (detail && detail.video && String(detail.aweme_id) === videoId) {
           apiDetail = detail
@@ -1083,6 +1089,8 @@ async function parseDouyinWithCDP(url: string): Promise<any> {
         }
       } catch (e) {
         // 忽略解析失败
+      } finally {
+        await cdp.send('Fetch.continueResponse', { requestId: params.requestId }).catch(() => {})
       }
     })
 
@@ -2450,7 +2458,8 @@ function runYtDlp(args: string[]): Promise<{ code: number | null; output: string
 ipcMain.handle('ytdlp:parse', async (_event, ...args) => {
   let url = args[0] as string
   const cookiesFile = args[1] as string | undefined
-  // 从分享口令/整段文本中提取抖音链接（纯数字视为视频 ID）
+  // 解析模式：auto 自动识别 / single 强制单视频 / batch 强制主页批量
+  const parseMode = (args[2] as string) || 'auto'
   const extractedUrl = extractDouyinUrl(url)
   if (extractedUrl !== url) {
     console.log('[ytdlp:parse] 从分享文本提取抖音链接:', extractedUrl.slice(0, 120))
@@ -2477,7 +2486,12 @@ ipcMain.handle('ytdlp:parse', async (_event, ...args) => {
     }
   }
   // 抖音用户主页：枚举视频列表（批量下载）
-  if (isDouyinProfileUrl(url)) {
+  // batch 模式强制走主页枚举（用户手动指定）；single 模式跳过主页分支
+  if (parseMode === 'batch' && isDouyinUrl(url)) {
+    console.log('[ytdlp:parse] 用户指定批量模式，强制主页枚举')
+    return await parseDouyinProfile(url, cookiesFile)
+  }
+  if (parseMode !== 'single' && isDouyinProfileUrl(url)) {
     return await parseDouyinProfile(url, cookiesFile)
   }
   // 如果是抖音链接，优先使用 API 解析，失败依次回退 CDP 媒体流拦截、SSR 解析

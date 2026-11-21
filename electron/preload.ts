@@ -49,7 +49,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // YT-DLP 操作
   ytdlp: {
-    parse: (url: string, cookiesFile?: string) => ipcRenderer.invoke('ytdlp:parse', url, cookiesFile),
+    parse: (url: string, cookiesFile?: string, mode?: string) => ipcRenderer.invoke('ytdlp:parse', url, cookiesFile, mode),
     download: (options: { url: string; formatId: string; outputDir: string; filename?: string; taskId: string; directUrl?: string; audioUrl?: string; cookiesFile?: string; downloadMode?: 'video' | 'audio'; audioTrack?: any; subtitles?: string[] }) =>
       ipcRenderer.invoke('ytdlp:download', options),
     pauseDownload: (taskId: string) => ipcRenderer.invoke('ytdlp:pauseDownload', taskId),

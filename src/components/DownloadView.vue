@@ -65,8 +65,25 @@
                 </button>
               </div>
             </div>
+            <!-- 解析模式选择 -->
+            <div class="flex items-center gap-1.5">
+              <span class="text-[11px] text-on-surface-variant">解析模式：</span>
+              <button
+                v-for="m in parseModes"
+                :key="m.value"
+                class="px-2.5 py-1 text-[11px] font-semibold rounded-full border transition-colors"
+                :class="parseMode === m.value
+                  ? 'bg-primary-container text-on-primary-container border-primary/40'
+                  : 'bg-surface-container-lowest text-on-surface-variant border-outline-variant/20 hover:border-primary/40'"
+                :disabled="isParsing"
+                :title="m.tip"
+                @click="parseMode = m.value"
+              >
+                {{ m.label }}
+              </button>
+            </div>
             <div class="flex gap-3">
-              <button 
+              <button
                 class="flex-1 flex items-center justify-center gap-2 rounded-md h-10 bg-surface-container-highest text-on-surface font-headline font-semibold text-sm hover:bg-surface-variant transition-colors border border-outline-variant/10"
                 @click="pasteUrl"
               >
@@ -683,6 +700,13 @@ function openCookieHelp() {
   window.electronAPI?.shell?.openExternal?.('https://github.com/cshuangyy/videdown/wiki/YouTube-Cookie-Setup')
 }
 const isParsing = ref(false)
+// 解析模式：auto 自动识别 / single 强制单视频 / batch 强制主页批量
+const parseMode = ref<'auto' | 'single' | 'batch'>('auto')
+const parseModes: Array<{ label: string; value: 'auto' | 'single' | 'batch'; tip: string }> = [
+  { label: '自动', value: 'auto', tip: '根据链接自动识别单视频或主页' },
+  { label: '单视频', value: 'single', tip: '强制按单个视频解析' },
+  { label: '主页批量', value: 'batch', tip: '强制按博主主页批量枚举' },
+]
 const parseProgress = ref(0)
 const videoInfo = ref<VideoInfo | null>(null)
 // 批量下载状态（抖音主页枚举）
@@ -1056,7 +1080,7 @@ async function parseVideo() {
     const settings = JSON.parse(localStorage.getItem('settings') || '{}')
     const cookiesFile = settings.cookiesFile || ''
     
-    const info = await window.electronAPI.ytdlp.parse(url.value, cookiesFile)
+    const info = await window.electronAPI.ytdlp.parse(url.value, cookiesFile, parseMode.value)
     videoInfo.value = info
 
     // 抖音主页枚举结果：进入批量下载面板
@@ -1260,7 +1284,7 @@ async function startBatchDownload() {
         }
       } else {
         try {
-          const info = await window.electronAPI.ytdlp.parse(item.url, cookiesFile)
+          const info = await window.electronAPI.ytdlp.parse(item.url, cookiesFile, 'single')
           if (!info || !info.formats || info.formats.length === 0) continue
           title = info.title || title
           selectedFormat = info.formats[0]
@@ -1555,7 +1579,7 @@ async function retrySelectedTasks() {
         downloadTasks.value[idx].error = undefined
         downloadTasks.value[idx].progress = 0
         try {
-          const info = await window.electronAPI.ytdlp.parse(t.url, cookiesFile)
+          const info = await window.electronAPI.ytdlp.parse(t.url, cookiesFile, 'single')
           if (!info || !info.formats || info.formats.length === 0) {
             downloadTasks.value[idx].status = 'error'
             downloadTasks.value[idx].error = '重新解析失败'
